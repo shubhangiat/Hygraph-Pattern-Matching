@@ -1,4 +1,6 @@
-from hygraph import HyGraph
+from datetime import datetime
+
+from hygraph import HyGraph, Edge
 from generator import GraphDataGenerator
 
 if __name__ == "__main__":
@@ -27,3 +29,10 @@ if __name__ == "__main__":
         hg.add_property(element_type='subgraph', oid='sg100', property_key='activity', tsid=1)
     except ValueError as e:
         print(e)
+    # Add a new edge to test the update mechanism
+    new_edge_id = generator.hygraph.id_generator.generate_edge_id()
+    new_edge = Edge(oid=new_edge_id, source=generator.person_nodes[0], target=generator.person_nodes[1], label='connected', start_time=datetime(2020, 1, 1))
+    hg.add_edge(new_edge)
+
+    # Call the graph metrics evolution function to update memberships after adding the new edge
+    hg.graph_metrics_evolution()
