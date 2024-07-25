@@ -10,6 +10,8 @@ import random
 from igraph import Graph as IGraph
 from IDGenerator import IDGenerator
 from Oberserver import Subject
+#conflict
+
 
 class Node(Subject):
     def __init__(self, oid, label):
