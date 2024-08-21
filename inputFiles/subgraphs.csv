@@ -1,0 +1,4 @@
+subgraph_id,label,start_time,end_time,node_file_ids,edge_file_ids
+1,sg1,2023-01-01,,1 2 3 5,1 2 3
+2,sg2,2023-01-01,,1 6 2 7,1 2
+3,sg3,2023-01-01,,1 6 2 7,1 2
