@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from igraph import Graph as IGraph
 from idGenerator import IDGenerator
 from oberserver import Subject
-
+FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
+from constraints import parse_datetime
 
 class Node(Subject):
     def __init__(self, oid, label, node_id=None):
@@ -55,9 +56,9 @@ class Edge(Subject):
         return f"Edge(oid={self.oid}, source={self.source}, target={self.target}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }})"
 
 class TimeSeriesMetadata:
-    def __init__(self, owner_id, edge_label='', element_type='', attribute=''):
+    def __init__(self, owner_id, label='', element_type='', attribute=''):
         self.owner_id = owner_id
-        self.edge_label = edge_label
+        self.label = label
         self.element_type = element_type
         self.attribute = attribute
 
@@ -90,95 +91,30 @@ class Subgraph(Subject):
         self.properties = {}
         self.filter_func = filter_func
 
-
-class GraphObserver:
-    def __init__(self, hygraph):
-        self.hygraph = hygraph
-        self.currently_updating = set()
-
-    def update_queries(self, queries):
-        self.hygraph.queries = queries
-        print(f"Queries updated: {queries}")
-
-    def update_node_time_series(self, node, query, edge=None):
-        attribute = query['time_series_config']['attribute']
-        aggregate_function = query['time_series_config']['aggregate_function']
-
-        current_value = aggregate_function(
-            self.hygraph,
-            'node',
-            node.oid,
-            attribute,
-            datetime.now()
-        )
-
-        tsid = node.properties.get(attribute)
-        if tsid and tsid in self.hygraph.time_series:
-            print(f"Updating time series for {node.oid}, attribute {attribute}")
-            self.hygraph.append_time_series(tsid, datetime.now(), current_value)
-        else:
-            print(f"Creating time series for {node.oid}, attribute {attribute}")
-            self.hygraph.create_time_series_from_graph(query)
-
-    def update(self, subject):
-        print(f"GraphObserver: Update called for {type(subject).__name__} with ID {subject.oid}")
-
-        if subject not in self.currently_updating:
-            self.currently_updating.add(subject)
-            element_type = "Edge"
-            print('ddfdcdcd',element_type,self.hygraph.queries)
-            for query in self.hygraph.queries:
-                print(f"GraphObserver: in for loop {self.hygraph.queries} {query}")
-                if type(subject).__name__ != element_type:
-                    print("Skipping metric because element type is not 'edge'")
-                    continue  # Skip if the query's element type does not match
-
-                if query.get('label') and subject.label != query['label']:
-                    print(f"Skipping metric because label does not match: {query['label']} vs {subject.label}")
-                    continue  # Skip if the edge label does not match
-
-                direction = query['time_series_config'].get('direction', 'both')
-                source_node = self.hygraph.get_element('node', subject.source)
-                target_node = self.hygraph.get_element('node', subject.target)
-
-                if direction in ['in', 'both']:
-                    self.update_node_time_series(target_node, query, subject)
-                if direction in ['out', 'both']:
-                    self.update_node_time_series(source_node, query, subject)
-            self.currently_updating.remove(subject)
-
-
 class HyGraph:
     def __init__(self):
         self.graph = nx.MultiGraph()
         self.time_series = {}
         self.subgraphs = {}
         self.id_generator = IDGenerator()
-        self.graph_observer = GraphObserver(self)
         self.updated = False  # Flag to track updates
-        self.queries = []
+        self.query =None
 
     def set_updated(self, value=True):
         self.updated = value
-        print(f"Set updated called: {value}")
 
     def add_node(self, node):
         self.graph.add_node(node.oid, data=node)
-        node.attach(self.graph_observer)
         self.set_updated()
-        node.notify()
 
     def add_edge(self, edge):
         self.graph.add_edge(edge.source, edge.target, key=edge.oid, data=edge)
         print("Adding edge with:", edge.label, edge.start_time)
-        edge.attach(self.graph_observer)
         self.set_updated()
-        edge.notify()
 
     def add_subgraph(self, subgraph):
         subgraph_view = nx.subgraph_view(self.graph, filter_node=subgraph.filter_func, filter_edge=subgraph.filter_func)
         self.subgraphs[subgraph.subgraph_id] = {'view': subgraph_view, 'data': subgraph}
-        subgraph.attach(self.graph_observer)
 
     def delete_node(self, oid, end_time=None):
         if oid not in self.graph.nodes:
@@ -216,10 +152,10 @@ class HyGraph:
         Parameters:
         - query (dict): A dictionary containing filters and configuration for time series creation.
         """
-        self.queries.append(query)
+        self.query = query
+        self.batch_process()
         print(f"Query added: {query}")
         # If needed, you can reinitialize the observer or notify it about the new query
-        self.graph_observer.update_queries(self.queries)
 
     def set_query(self, query):
         """
@@ -229,14 +165,12 @@ class HyGraph:
         self.query = query
         print("Query has been set/updated.")
 
-    def get_query(self, index=None):
+    def get_query(self):
         """
-        Returns the current query or queries being used by the HyGraph instance.
+        Returns the current query  being used by the HyGraph instance.
         If an index is provided, return the specific query at that index.
         """
-        if index is not None:
-            return self.queries[index] if 0 <= index < len(self.queries) else None
-        return self.queries[len(self.queries)]
+        return self.query
 
     def get_element(self, element_type, oid):
         if element_type == 'node':
@@ -282,7 +216,27 @@ class HyGraph:
                     break
             if not found:
                 raise ValueError(f"Edge with ID {oid} does not exist.")
+    def update_membership(self, element, subgraph_id, start_time, end_time):
+        tsid = element.membership.get(subgraph_id) or self.id_generator.generate_timeseries_id()
 
+        if tsid not in self.time_series:
+            metadata = TimeSeriesMetadata(
+                owner_id=element.oid,
+                label=element.label,
+                element_type=type(element).__name__.lower(),  # 'node' or 'edge'
+                attribute='membership'
+            )
+            membership_series = TimeSeries(tsid, [start_time], ['membership'], [[subgraph_id]],metadata)
+            self.time_series[tsid] = membership_series
+        else:
+            membership_series = self.time_series[tsid]
+            membership_series.append_data(start_time, subgraph_id)
+
+        if end_time:
+            membership_series.append_data(end_time, None)
+
+        element.membership[subgraph_id] = tsid
+        print(f"Added subgraph {subgraph_id} to {type(element).__name__.lower()} {element.oid}'s membership from {start_time} to {end_time}.")
 
     def get_node(self, oid):
         if oid not in self.graph.nodes:
@@ -332,6 +286,9 @@ class HyGraph:
             self.time_series[tsid].append_data(date, value)
         else:
             raise ValueError(f"Time series with ID {tsid} does not exist.")
+
+
+
     def create_time_series_from_graph(self, query):
         """
     Create time series data for nodes, edges, or subgraphs based on a provided query.
@@ -361,10 +318,21 @@ class HyGraph:
 
             # Filter nodes based on the node_filter
             selected_nodes = self.filter_nodes(node_filter, edge_filter)
-            print('Selected nodes:', selected_nodes)
             # Process each selected node to create time series
-            for node in selected_nodes:
-                self.process_element_for_time_series(node, ts_config, element_type='node')
+            for node_data in selected_nodes:
+
+                data = node_data['data']
+                attribute = self.query['time_series_config']['attribute']
+                tsid = data.properties.get(attribute)
+                if tsid and tsid in self.time_series:
+                    print(f"Appending to existing time series {tsid} for node {data.oid}")
+                    current_value = self.query['time_series_config']['aggregate_function'](
+                        self, 'node', data.oid, attribute, datetime.now()
+                    )
+                    self.append_time_series(tsid, datetime.now(), current_value)
+                else:
+                    print(f"Creating new time series for node {data.oid}")
+                    self.process_element_for_time_series(node_data, ts_config, element_type='node')
 
         elif element_type == 'subgraph':
             # Process subgraphs based on subgraph_id or subgraph_label
@@ -391,7 +359,6 @@ class HyGraph:
         filtered_nodes = []
         for node_id, node_data in self.graph.nodes(data=True):
             if node_filter(node_data):
-                print('nodes filterrrrrrrr:', node_filter(node_data))
                 # Check edges if an edge filter is specified
                 if edge_filter:
                     connected_edges = self.graph.edges(node_id, data=True)
@@ -402,23 +369,27 @@ class HyGraph:
                     filtered_nodes.append(node_data)
         return filtered_nodes
 
-    def process_element_for_time_series(self, element, ts_config, element_type='node'):
+    def process_element_for_time_series(self, element_data, ts_config, element_type='node'):
+        element = element_data['data']
         start_date = ts_config['start_date']
         end_date = ts_config.get('end_date', None)
         attribute = ts_config['attribute']
         aggregate_function = ts_config['aggregate_function']
         freq = ts_config.get('freq', 'D')
-
+        element_start_time = parse_datetime(element.start_time) if isinstance(element.start_time, str) else element.start_time
+        element_end_time = parse_datetime(element.end_time) if isinstance(element.end_time, str) else element.end_time
+        # Check if the element is within the time range
+        if pd.isna(end_date):
+            end_date =datetime.now()
+        if not (element_start_time <= end_date and element_end_time >= start_date):
+            print(f"Skipping {element_type} {element.oid} as it is outside the query time range.")
+            return
         date_range = pd.date_range(start=start_date, end=end_date, freq=freq)
         values = []
         last_value = None
-
         for date in date_range:
             current_value = aggregate_function(self, element_type, element.oid, attribute, date)
-            if current_value != last_value:
-                values.append((date, current_value))
-                last_value = current_value
-
+            values.append((date, current_value))
         if values:
             timestamps, data_values = zip(*values)
             reshaped_data_values = np.array(data_values)[:, np.newaxis]
@@ -426,11 +397,7 @@ class HyGraph:
             metadata = TimeSeriesMetadata(element.oid, '', element_type, attribute)
             time_series = TimeSeries(tsid, timestamps, [attribute], reshaped_data_values, metadata)
             self.time_series[tsid] = time_series
-            print('Time series created:', tsid, time_series)
             self.add_property(element_type, element.oid, attribute, tsid)
-
-
-
 
     def graph_metrics_evolution(self):
         igraph_g = IGraph.TupleList(self.graph.edges(), directed=False)
@@ -452,6 +419,11 @@ class HyGraph:
             else:
                 self.graph.edges[source, target, key]['data'].membership[timestamp] = f"{source_community},{target_community}"
 
+    def batch_process(self):
+        """Batch processing function to process all nodes and edges."""
+        print("Starting batch processing...")
+        self.create_time_series_from_graph(self.query)  # Update time series for all nodes and edges
+        print("Batch processing completed.")
 
     def display(self):
         print("Nodes:")
@@ -466,7 +438,7 @@ class HyGraph:
         for subgraph_id, data in self.subgraphs.items():
             print(f"Subgraph {subgraph_id}: {data}")
 
-        print("\nTime Series:")
+        print("\nTime Series:", len(self.time_series))
         for tsid, ts in self.time_series.items():
             print(f"Time Series {tsid}: {ts.metadata.owner_id}")
             variables = [str(var) for var in ts.data.coords['variable'].values]

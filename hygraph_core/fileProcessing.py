@@ -27,12 +27,14 @@ class HyGraphFileLoader:
         self.edges_folder = edges_folder
         self.subgraph_file = subgraph_file
         self.observer = Observer()
+        self.loading_complete = False  # Flag to track loading status
 
     def load_files(self):
         # Load nodes, edges, and subgraphs
         self.load_nodes()
         self.load_edges()
         self.process_subgraphs(self.subgraph_file)
+        self.loading_complete = True  # Set flag to True after loading all files
 
     def load_nodes(self):
         node_file_paths = [os.path.join(self.nodes_folder, file) for file in os.listdir(self.nodes_folder) if file.endswith('.csv')]
@@ -46,6 +48,8 @@ class HyGraphFileLoader:
         for edge_file_path in edge_file_paths:
             handler = EdgeFileHandler(self.hygraph, edge_file_path)
             handler.process_file()
+    def is_loading_complete(self):
+        return self.loading_complete
 
     def process_subgraphs(self, file_path):
         df = pd.read_csv(file_path)
@@ -210,10 +214,9 @@ class EdgeFileHandler(FileSystemEventHandler):
                 edge_exists = False
                 for u, v, key, data in self.hygraph.graph.edges(data=True, keys=True):
                     existing_edge = data['data']
-
-                    if existing_edge.source == source_node.oid and existing_edge.target == target_node.oid:
+                    if external_edge_id == existing_edge.edge_id:
                         edge_exists = True
-                        print('add property, element ',existing_edge.properties)
+                        print('add property, element ', existing_edge.properties)
                         # Update the existing edge properties and external ID if they differ
                         if existing_edge.properties != edge_properties or existing_edge.edge_id != external_edge_id:
 
