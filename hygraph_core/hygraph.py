@@ -216,27 +216,25 @@ class HyGraph:
                     break
             if not found:
                 raise ValueError(f"Edge with ID {oid} does not exist.")
-    def update_membership(self, element, subgraph_id, start_time, end_time):
-        tsid = element.membership.get(subgraph_id) or self.id_generator.generate_timeseries_id()
+
+    def update_membership(self, element, timestamps, subgraph_ids):
+        # Ensure that timestamps and subgraph_ids are aligned
+        if len(timestamps) != len(subgraph_ids):
+            raise ValueError("Timestamps and subgraph IDs arrays must have the same length.")
+
+        tsid = element.membership.get('subgraph_membership') or self.id_generator.generate_timeseries_id()
 
         if tsid not in self.time_series:
-            metadata = TimeSeriesMetadata(
-                owner_id=element.oid,
-                label=element.label,
-                element_type=type(element).__name__.lower(),  # 'node' or 'edge'
-                attribute='membership'
-            )
-            membership_series = TimeSeries(tsid, [start_time], ['membership'], [[subgraph_id]],metadata)
+            membership_series = TimeSeries(tsid, timestamps, ['membership'], [subgraph_ids])
             self.time_series[tsid] = membership_series
         else:
             membership_series = self.time_series[tsid]
-            membership_series.append_data(start_time, subgraph_id)
+            for timestamp, subgraph_id in zip(timestamps, subgraph_ids):
+                membership_series.append_data(timestamp, subgraph_id)
 
-        if end_time:
-            membership_series.append_data(end_time, None)
-
-        element.membership[subgraph_id] = tsid
-        print(f"Added subgraph {subgraph_id} to {type(element).__name__.lower()} {element.oid}'s membership from {start_time} to {end_time}.")
+        element.membership['subgraph_membership'] = tsid
+        print(
+            f"Added subgraph membership to {type(element).__name__.lower()} {element.oid} with time series ID {tsid}.")
 
     def get_node(self, oid):
         if oid not in self.graph.nodes:

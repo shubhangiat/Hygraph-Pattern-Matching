@@ -5,7 +5,8 @@ from hygraph import HyGraph, Edge, PGNode, Subgraph, TimeSeries
 from fileProcessing import NodeFileHandler, EdgeFileHandler
 from collections import defaultdict
 import time
-from constraints import is_valid_membership
+from constraints import is_valid_membership, parse_datetime
+
 # Placeholder for a date far in the future
 FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
 class HyGraphBatchProcessor:
@@ -117,6 +118,13 @@ class HyGraphBatchProcessor:
         #self.hygraph.display()
 
     def process_subgraph_batches(self):
+        # Create a dictionary to store subgraph start times
+        subgraph_start_times = {}
+        for df in self.subgraph_batches:
+            for _, row in df.iterrows():
+                subgraph_id = row['id']
+                start_time = parse_datetime(row['start_time'])
+                subgraph_start_times[subgraph_id] = start_time
         for df in self.subgraph_batches:
             for _, row in df.iterrows():
                 label = row['label']
@@ -144,24 +152,29 @@ class HyGraphBatchProcessor:
                 subgraph = Subgraph(subgraph_id=subgraph_id, label=label, start_time=start_time, end_time=end_time,
                                     filter_func=filter_func)
                 self.hygraph.add_subgraph(subgraph)
-
+                # Collect timestamps and subgraph IDs
+                timestamps = []
+                subgraph_ids = []
                 # Update membership for nodes
                 for node_id in node_internal_ids:
                     node = self.hygraph.get_element('node', node_id)
-                    if is_valid_membership(node, start_time, end_time):
-                        self.hygraph.update_membership(node, subgraph_id, start_time, end_time)
-                    else:
-                        print(f"Node {node_id} cannot be part of subgraph {subgraph_id} due to timeline mismatch.")
+                    memberships = [subgraph_id for subgraph_id in subgraph_start_times if
+                                   is_valid_membership(node, subgraph_start_times[subgraph_id], end_time)]
+                    for ts in memberships:
+                        timestamps.append(subgraph_start_times[ts])
+                        subgraph_ids.append(ts)
 
+                    self.hygraph.update_membership(node, timestamps, subgraph_ids)
                 # Update membership for edges
                 for edge_id in edge_internal_ids:
                     edge = self.hygraph.get_element('edge', edge_id)
-                    if is_valid_membership(edge, start_time, end_time):
-                        self.hygraph.update_membership(edge, subgraph_id, start_time, end_time)
-                    else:
-                        print(f"Edge {edge_id} cannot be part of subgraph {subgraph_id} due to timeline mismatch.")
+                    memberships = [subgraph_id for subgraph_id in subgraph_start_times if
+                                   is_valid_membership(edge, subgraph_start_times[subgraph_id], end_time)]
+                    for ts in memberships:
+                        timestamps.append(subgraph_start_times[ts])
+                        subgraph_ids.append(ts)
 
-
+                    self.hygraph.update_membership(edge, timestamps, subgraph_ids)
 
     # Utility Functions
     def end_time_config(self,end_time):

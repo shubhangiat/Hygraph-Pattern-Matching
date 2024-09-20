@@ -15,6 +15,7 @@ def is_valid_membership(element, subgraph_start_time, subgraph_end_time):
     - bool: True if the element can be part of the subgraph, False otherwise.
     """
     # Check if the element's start_time and end_time are within the subgraph's timeline
+    #print(element.start_time,subgraph_start_time, parse_datetime(element.start_time), parse_datetime(subgraph_start_time))
     if parse_datetime(element.start_time) >  parse_datetime(subgraph_start_time):
         print(f"Element {element.oid} starts after the subgraph {subgraph_start_time}.")
         return False
@@ -22,14 +23,17 @@ def is_valid_membership(element, subgraph_start_time, subgraph_end_time):
         if element.end_time < subgraph_end_time:
             print(f"Element {element.oid} ends before the subgraph {subgraph_end_time}.")
             return False
+    print("marchan")
     return True
 
     # Convert string dates to datetime objects if necessary
 def parse_datetime(datetime_str):
-    try:
-        print(datetime_str)
-        return datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
-    except (TypeError, ValueError):
-        return None
+    if isinstance(datetime_str, str):
+        print("value str : ", datetime_str)
+        try:
+            print(datetime_str)
+            return datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+        except (TypeError, ValueError):
+            return None
 
 
