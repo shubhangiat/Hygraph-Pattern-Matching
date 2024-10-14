@@ -17,10 +17,9 @@ class Node(Subject):
         self.oid = oid
         self.node_id = node_id  # External ID from CSV file
         self.label = label
-        self.membership = {}
+        self.membership = None
     def __repr__(self):
-        membership_str = ', '.join(f"{k}: {v}" for k, v in self.membership.items())
-        return f"Node(oid={self.oid}, label={self.label}, membership={{ {membership_str} }})"
+        return f"Node(oid={self.oid}, label={self.label}, membership={self.membership})"
 class PGNode(Node):
     def __init__(self, oid, label, start_time, end_time=None, node_id=None):
         super().__init__(oid, label,node_id)
@@ -50,17 +49,34 @@ class Edge(Subject):
         self.start_time = start_time
         self.end_time = end_time
         self.properties = {}
-        self.membership = {}
+        self.membership = None
     def __repr__(self):
         properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
-        return f"Edge(oid={self.oid}, source={self.source}, target={self.target}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }})"
+        return f"Edge(oid={self.oid}, source={self.source}, target={self.target}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, membership={self.membership} properties={{ {properties_str} }})"
 
+class PGEdge(Edge):
+    def __init__(self, oid, label, start_time, end_time=None, node_id=None):
+        super().__init__(oid, label,node_id)
+        self.start_time = start_time
+        self.end_time = end_time
+        self.properties = {}
+    def __repr__(self):
+        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
+        base_str = super().__repr__()
+        return f"{base_str}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }}"
+
+class TSEdge(Edge):
+    def __init__(self, oid, label,time_series):
+        super().__init__(oid, label)
+        self.series = time_series
+    def __repr__(self):
+        base_str = super().__repr__()
+        return f"{base_str}, series={self.series}"
 class TimeSeriesMetadata:
     def __init__(self, owner_id, label='', element_type='', attribute=''):
         self.owner_id = owner_id
         self.label = label
         self.element_type = element_type
-        self.attribute = attribute
 
 class TimeSeries:
     """
@@ -91,6 +107,11 @@ class Subgraph(Subject):
         self.properties = {}
         self.filter_func = filter_func
 
+    def __repr__(self):
+        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
+        return f"Subgraph(id={self.subgraph_id}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }})"
+
+
 class HyGraph:
     def __init__(self):
         self.graph = nx.MultiGraph()
@@ -105,14 +126,16 @@ class HyGraph:
 
     def add_node(self, node):
         self.graph.add_node(node.oid, data=node)
+        print("Adding node with:", node.label, node.start_time, node.oid)
         self.set_updated()
 
     def add_edge(self, edge):
         self.graph.add_edge(edge.source, edge.target, key=edge.oid, data=edge)
-        print("Adding edge with:", edge.label, edge.start_time)
+        print("Adding edge with:", edge.label, edge.start_time, edge.oid)
         self.set_updated()
 
     def add_subgraph(self, subgraph):
+        print(f"Adding subgraph with ID: {subgraph.subgraph_id}")
         subgraph_view = nx.subgraph_view(self.graph, filter_node=subgraph.filter_func, filter_edge=subgraph.filter_func)
         self.subgraphs[subgraph.subgraph_id] = {'view': subgraph_view, 'data': subgraph}
 
@@ -195,29 +218,70 @@ class HyGraph:
         else:
             print(f"Property {property_key} already exists for element with ID {oid}.")
 
-    def add_membership(self, element_type, oid, tsid):
+    def add_membership(self, element_id, timestamp, subgraph_ids,element_type):
         """
-        Add a membership time series to a node or edge.
-        :param element_type: Type of the element ('node' or 'edge').
-        :param oid: ID of the node or edge.
-        :param tsid: Time series ID of the membership.
+           Adds subgraph memberships to the element's TimeSeries at the given timestamp.
+           """
+        element = self.get_element(element_type, element_id)
+        if not element:
+            print(f"No element found with ID {element_id}")
+            return
+
+        if element.membership is None:
+            tsid = self.id_generator.generate_timeseries_id()
+            membership_string = ' '.join(subgraph_ids)
+            print('membership', membership_string)
+            metadata=TimeSeriesMetadata(element_id,'membership',element_type)
+            time_series = TimeSeries(tsid, [timestamp], ['membership'], membership_string,metadata)
+            self.time_series[tsid] = time_series
+            element.membership = tsid
+            print(f"Timeseries created for: {element_type} {element_id}: {time_series}")
+        else:
+
+            tsid = element.membership
+            time_series = self.time_series[tsid]
+            # Initialize the membership string for each update
+            # Ensure there is at least one entry to extract the last state
+            # Get the last known membership state
+            if time_series.data.shape[0] > 0:
+                last_entry = time_series.data.isel(time=-1).item().split()
+            else:
+                last_entry = []
+            # Combine, deduplicate, and sort memberships
+            updated_membership = sorted(set(last_entry + subgraph_ids))
+            membership_string = ' '.join(updated_membership)
+            print('membership', membership_string)
+            time_series.append_data(timestamp, membership_string)
+            print(f"Updated membership for {element_type} {element_id} at {timestamp}: add {subgraph_ids}")
+
+    def remove_membership(self, element_id, timestamp, subgraph_ids,element_type):
         """
-        if element_type == 'node':
-            if oid not in self.graph.nodes:
-                raise ValueError(f"Node with ID {oid} does not exist.")
-            self.graph.nodes[oid]['memberships'] = tsid
+        Removes subgraph memberships from the element's TimeSeries at the given timestamp.
+        """
+        element = self.get_element(element_type, element_id)
+        if not element:
+            print(f"No element found with ID {element_id}")
+            return
 
-        elif element_type == 'edge':
-            found = False
-            for source, target, key in self.graph.edges(keys=True):
-                if key == oid:
-                    self.graph.edges[source, target, key]['memberships'] = tsid
-                    found = True
-                    break
-            if not found:
-                raise ValueError(f"Edge with ID {oid} does not exist.")
+        if element.membership is None:
+            print(f"No TimeSeries initialized for {element_type} {element_id}")
 
-    def update_membership(self, element, timestamps, subgraph_ids):
+        else:
+            tsid = element.membership
+            time_series = self.time_series[tsid]
+            # Get the last known membership state
+            if time_series.data.shape[0] > 0:
+                last_entry = time_series.data.isel(time=-1).item().split()
+            else:
+                last_entry = []
+            # Remove specified subgraph IDs
+            updated_membership = [sg for sg in last_entry if sg not in subgraph_ids]
+            membership_string = ' '.join(updated_membership)
+
+            time_series.append_data(timestamp, membership_string)
+            print(f"Updated membership for {element_type} {element_id} at {timestamp}: remove {subgraph_ids}")
+
+    def update_membership(self, element, timestamps, subgraph_ids,action):
         # Ensure that timestamps and subgraph_ids are aligned
         if len(timestamps) != len(subgraph_ids):
             raise ValueError("Timestamps and subgraph IDs arrays must have the same length.")
@@ -225,16 +289,31 @@ class HyGraph:
         tsid = element.membership.get('subgraph_membership') or self.id_generator.generate_timeseries_id()
 
         if tsid not in self.time_series:
+
             membership_series = TimeSeries(tsid, timestamps, ['membership'], [subgraph_ids])
             self.time_series[tsid] = membership_series
         else:
             membership_series = self.time_series[tsid]
+            # Update existing time series based on action
             for timestamp, subgraph_id in zip(timestamps, subgraph_ids):
-                membership_series.append_data(timestamp, subgraph_id)
+                if action == 'add':
+                    # Use the existing append_data method to add the subgraph_id
+                    membership_series.append_data(timestamp, subgraph_id)
+                elif action == 'remove':
+                    # Remove the subgraph ID for the given timestamp
+                    index = membership_series.timestamps.index(
+                        timestamp) if timestamp in membership_series.timestamps else None
+                    if index is not None:
+                        existing_data = membership_series.data[index]
+                        if subgraph_id in existing_data:
+                            existing_data.remove(subgraph_id)  # Remove subgraph ID if present
+                            # Optionally: If you want to mark it as "removed" without deleting
+                            if not existing_data:
+                                existing_data.append(None)  # Placeholder to indicate removal
 
-        element.membership['subgraph_membership'] = tsid
-        print(
-            f"Added subgraph membership to {type(element).__name__.lower()} {element.oid} with time series ID {tsid}.")
+            element.membership['subgraph_membership'] = tsid
+            print(
+                f"Added subgraph membership to {type(element).__name__.lower()} {element.oid} with time series ID {tsid}.")
 
     def get_node(self, oid):
         if oid not in self.graph.nodes:
@@ -392,8 +471,9 @@ class HyGraph:
             timestamps, data_values = zip(*values)
             reshaped_data_values = np.array(data_values)[:, np.newaxis]
             tsid = self.id_generator.generate_timeseries_id()
-            metadata = TimeSeriesMetadata(element.oid, '', element_type, attribute)
+            metadata = TimeSeriesMetadata(element.oid, element_type, attribute)
             time_series = TimeSeries(tsid, timestamps, [attribute], reshaped_data_values, metadata)
+
             self.time_series[tsid] = time_series
             self.add_property(element_type, element.oid, attribute, tsid)
 
@@ -444,7 +524,9 @@ class HyGraph:
             ts_df = ts.data.to_dataframe('value').reset_index()
             grouped = ts_df.groupby('time')
             for time, group in grouped:
-                values = [f"{row['variable']}: {row['value']}" for idx, row in group.iterrows()]
+                values = [f" {row['value']}" for idx, row in group.iterrows()]
                 row_str = ", ".join(values)
                 print(f"{time}, {row_str}")
         self.set_updated(False)  # Reset the flag after displaying
+
+#utility functions

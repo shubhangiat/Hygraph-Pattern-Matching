@@ -25,11 +25,16 @@ if __name__ == "__main__":
     nodes_folder = os.path.join(base_dir, 'inputFiles', 'nodes')
     edges_folder = os.path.join(base_dir, 'inputFiles', 'edges')
     subgraph_folder = os.path.join(base_dir, 'inputFiles', 'subgraphs')
+    edges_membership_path = base_dir+"/inputFiles/edge_membership.csv"
+    nodes_membership_path = base_dir+"/inputFiles/node_membership.csv"
+
     # Initialize the file loader with the directories and files
     loader = HyGraphBatchProcessor(
         nodes_folder=nodes_folder,
         edges_folder=edges_folder,
-        subgraphs_folder=subgraph_folder
+        subgraphs_folder=subgraph_folder,
+        edges_membership=edges_membership_path,
+        nodes_membership=nodes_membership_path
     )
 
     # Define a condition to filter edges

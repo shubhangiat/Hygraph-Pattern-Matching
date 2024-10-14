@@ -15,25 +15,27 @@ def is_valid_membership(element, subgraph_start_time, subgraph_end_time):
     - bool: True if the element can be part of the subgraph, False otherwise.
     """
     # Check if the element's start_time and end_time are within the subgraph's timeline
-    #print(element.start_time,subgraph_start_time, parse_datetime(element.start_time), parse_datetime(subgraph_start_time))
-    if parse_datetime(element.start_time) >  parse_datetime(subgraph_start_time):
+    element_start_time = parse_datetime(element.start_time)
+    subgraph_start_time = parse_datetime(subgraph_start_time)
+    if element_start_time  >  subgraph_start_time:
         print(f"Element {element.oid} starts after the subgraph {subgraph_start_time}.")
         return False
     if (element.end_time and element.end_time!=FAR_FUTURE_DATE) and (subgraph_end_time and subgraph_end_time!=FAR_FUTURE_DATE) :
         if element.end_time < subgraph_end_time:
             print(f"Element {element.oid} ends before the subgraph {subgraph_end_time}.")
             return False
-    print("marchan")
     return True
 
     # Convert string dates to datetime objects if necessary
+
 def parse_datetime(datetime_str):
     if isinstance(datetime_str, str):
-        print("value str : ", datetime_str)
         try:
-            print(datetime_str)
-            return datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+            parsed_datetime = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+            return parsed_datetime
         except (TypeError, ValueError):
+            print(f"Failed to parse datetime: {datetime_str}")
             return None
-
-
+    else:
+        print(f"Expected a string, but got {type(datetime_str)}: {datetime_str}")
+        return datetime_str  # If it's already a datetime object, just return it
