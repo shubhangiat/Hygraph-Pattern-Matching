@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from fastdtw import fastdtw
+from numpy.lib.utils import source
 from scipy.spatial.distance import euclidean
 from datetime import datetime, timedelta
 from igraph import Graph as IGraph
@@ -20,6 +21,12 @@ class Node(Subject):
         self.membership = None
     def __repr__(self):
         return f"Node(oid={self.oid}, label={self.label}, membership={self.membership})"
+
+    def get_type(self):
+        """
+        Returns the type of node. Should be overridden by subclasses.
+        """
+        return "Node"
 class PGNode(Node):
     def __init__(self, oid, label, start_time, end_time=None, node_id=None):
         super().__init__(oid, label,node_id)
@@ -31,6 +38,9 @@ class PGNode(Node):
         base_str = super().__repr__()
         return f"{base_str}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }}"
 
+    def get_type(self):
+        return "PGNode"
+
 class TSNode(Node):
     def __init__(self, oid, label,time_series):
         super().__init__(oid, label)
@@ -38,6 +48,8 @@ class TSNode(Node):
     def __repr__(self):
         base_str = super().__repr__()
         return f"{base_str}, series={self.series}"
+    def get_type(self):
+        return "TSNode"
 class Edge(Subject):
     def __init__(self, oid, source, target, label, start_time, end_time=None, edge_id=None):
         super().__init__()
@@ -55,19 +67,17 @@ class Edge(Subject):
         return f"Edge(oid={self.oid}, source={self.source}, target={self.target}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, membership={self.membership} properties={{ {properties_str} }})"
 
 class PGEdge(Edge):
-    def __init__(self, oid, label, start_time, end_time=None, node_id=None):
-        super().__init__(oid, label,node_id)
-        self.start_time = start_time
-        self.end_time = end_time
-        self.properties = {}
+    def __init__(self, oid, source, target, label, properties, start_time, end_time=None, edge_id=None):
+        super().__init__(oid, source, target, label, start_time, end_time, edge_id)
+        self.properties = properties
     def __repr__(self):
         properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
         base_str = super().__repr__()
         return f"{base_str}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }}"
 
 class TSEdge(Edge):
-    def __init__(self, oid, label,time_series):
-        super().__init__(oid, label)
+    def __init__(self, oid, source, target, label, start_time, time_series, end_time=None, edge_id=None):
+        super().__init__(oid, source, target, label, start_time, end_time, edge_id)
         self.series = time_series
     def __repr__(self):
         base_str = super().__repr__()
@@ -121,12 +131,279 @@ class HyGraph:
         self.updated = False  # Flag to track updates
         self.query =None
 
+    def add_pg_node(self, oid, label, start_time, end_time=None, properties=None):
+        """
+        Add a new PGNode to the graph with specified properties.
+
+        :param oid: Object ID of the node.
+        :param label: Label for the node.
+        :param start_time: Start time for the node.
+        :param end_time: End time for the node (optional).
+        :param properties: A dictionary of properties to assign to the node.
+        """
+        # Create a new PGNode instance
+        pg_node = PGNode(oid, label, start_time, end_time)
+
+        # Add any specified properties to the node
+        if properties:
+            pg_node.properties.update(properties)
+
+        # Add the node to the graph
+        self.add_node(pg_node)
+
+        print(f"PGNode {oid} added with label '{label}' and properties {pg_node.properties}")
+
+        return pg_node
+
+    def add_ts_node(self, oid, label, time_series):
+        """
+        Add a new TSNode (Time Series Node) to the graph with a time series and label.
+
+        :param oid: Object ID of the node.
+        :param label: Label for the node.
+        :param time_series: Time series data to attach to the node.
+        """
+        # Create a new TSNode instance
+        ts_node = TSNode(oid, label, time_series)
+
+        # Add the node to the graph
+        self.add_node(ts_node)
+
+        print(f"TSNode {oid} added with label '{label}' and time series data {time_series}")
+
+        return ts_node
+
+    def remove_node(self, oid):
+        """
+        Delete a node from the graph.
+
+        :param oid: The Object ID of the node to be deleted.
+        :raises ValueError: If the node does not exist in the graph.
+        """
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+
+        # Remove the node from the graph
+        self.graph.remove_node(oid)
+
+        # Notify that the graph has been updated
+        self.set_updated()
+
+        print(f"Node {oid} has been removed from the graph.")
+
+    def update_node_properties(self, oid, properties):
+        """
+        Update the properties of an existing node in the graph.
+
+        :param oid: The Object ID of the node to be updated.
+        :param properties: A dictionary containing the new or updated properties for the node.
+        :raises ValueError: If the node does not exist in the graph.
+        """
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+
+        # Get the node from the graph
+        node = self.graph.nodes[oid]['data']
+
+        # Update the node's properties with the new values
+        node.properties.update(properties)
+
+        # Notify that the graph has been updated
+        self.set_updated()
+
+        print(f"Node {oid} properties updated: {properties}")
+
+        # Notify observers if needed
+        node.notify()
+
+    def get_node_property(self, oid, property_key):
+        """
+        Retrieve a specific property from a node.
+
+        :param oid: Object ID of the node.
+        :param property_key: The key of the property to retrieve.
+        :return: The value of the property, or None if the property does not exist.
+        :raises ValueError: If the node does not exist in the graph.
+        """
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+
+        # Get the node from the graph
+        node = self.graph.nodes[oid]['data']
+
+        # Retrieve the property if it exists
+        return node.properties.get(property_key, None)
+
+    def set_node_property(self, oid, property_key, value):
+        """
+        Set or update a specific property of a node.
+
+        :param oid: Object ID of the node.
+        :param property_key: The key of the property to set or update.
+        :param value: The value to assign to the property.
+        :raises ValueError: If the node does not exist in the graph.
+        """
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+
+        # Get the node from the graph
+        node = self.graph.nodes[oid]['data']
+
+        # Set or update the property
+        node.properties[property_key] = value
+
+        # Notify that the graph has been updated
+        self.set_updated()
+        node.notify()
+
+        print(f"Property '{property_key}' set/updated to '{value}' for Node {oid}.")
+
+    def add_pg_edge(self, oid, source_oid, target_oid, label, start_time, end_time=None, properties=None):
+        """
+        Add a new PGEdge to the graph with specified properties.
+
+        :param oid: Object ID of the edge.
+        :param source_oid: The Object ID of the source node.
+        :param target_oid: The Object ID of the target node.
+        :param label: The label of the edge.
+        :param start_time: The start time of the edge.
+        :param end_time: The end time of the edge (optional).
+        :param properties: A dictionary of additional properties for the edge (optional).
+        :raises ValueError: If the source or target node does not exist in the graph.
+        """
+        # Ensure the source and target nodes exist
+        if source_oid not in self.graph.nodes:
+            raise ValueError(f"Source node with ID {source_oid} does not exist.")
+        if target_oid not in self.graph.nodes:
+            raise ValueError(f"Target node with ID {target_oid} does not exist.")
+
+        if not properties:
+            properties = {}
+
+        # Create a new PGEdge instance
+        pg_edge = PGEdge(oid, source_oid, target_oid, label, properties, start_time, end_time)
+
+        # Add the edge to the graph
+        self.graph.add_edge(source_oid, target_oid, key=pg_edge.oid, data=pg_edge)
+
+        # Mark the graph as updated
+        self.set_updated()
+
+        print(
+            f"PGEdge {oid} added between Node {source_oid} and Node {target_oid} with label '{label}' and properties {pg_edge.properties}")
+
+        return pg_edge
+
+    def add_ts_edge(self, oid, source_oid, target_oid, label, time_series, start_time, end_time=None):
+        """
+        Add a new TSEdge to the graph with a time series and label.
+
+        :param oid: Object ID of the edge.
+        :param source_oid: The Object ID of the source node.
+        :param target_oid: The Object ID of the target node.
+        :param label: The label of the edge.
+        :param time_series: The time series data to attach to the edge.
+        :raises ValueError: If the source or target node does not exist in the graph.
+        """
+        # Ensure the source and target nodes exist
+        if source_oid not in self.graph.nodes:
+            raise ValueError(f"Source node with ID {source_oid} does not exist.")
+        if target_oid not in self.graph.nodes:
+            raise ValueError(f"Target node with ID {target_oid} does not exist.")
+
+        # Create a new TSEdge instance
+        ts_edge = TSEdge(oid, source_oid, target_oid, label, start_time, time_series)
+
+        # Add the edge to the graph
+        self.graph.add_edge(source_oid, target_oid, key=ts_edge.oid, data=ts_edge)
+
+        # Mark the graph as updated
+        self.set_updated()
+
+        print(f"TSEdge {oid} added between Node {source_oid} and Node {target_oid} with label '{label}' and time series data.")
+
+        return ts_edge
+
+    def remove_edge(self, oid):
+        """
+        Remove an edge from the graph.
+
+        :param oid: The Object ID of the edge to be deleted.
+        :raises ValueError: If the edge does not exist in the graph.
+        """
+        # Find the edge by OID
+        edge = self.get_edge(oid)
+
+        # Mark the graph as updated
+        self.set_updated()
+
+        print(f"Edge {oid} has been removed from the graph.")
+
+    def update_edge_properties(self, oid, properties):
+        """
+        Update the properties of an existing edge in the graph.
+
+        :param oid: Object ID of the edge.
+        :param properties: A dictionary containing the new or updated properties for the edge.
+        :raises ValueError: If the edge does not exist in the graph.
+        """
+        # Find the edge by OID
+        edge = self.get_edge(oid)
+
+        # Update the edge's properties with the new values
+        edge["data"].properties.update(properties)
+
+        # Mark the graph as updated
+        self.set_updated()
+
+        # Notify observers
+        edge["data"].notify()
+
+        print(f"Edge {oid} properties updated: {properties}")
+
+
+    def get_edge_property(self, oid, property_key):
+        """
+        Retrieve a specific property from an edge.
+
+        :param oid: Object ID of the edge.
+        :param property_key: The key of the property to retrieve.
+        :return: The value of the property, or None if the property does not exist.
+        :raises ValueError: If the edge does not exist in the graph.
+        """
+        # Find the edge by OID
+        edge = self.get_edge(oid)
+
+        # Retrieve the property if it exists
+        return edge["data"].properties.get(property_key, None)
+
+    def set_edge_property(self, oid, property_key, value):
+        """
+        Set or update a specific property of an edge.
+
+        :param oid: Object ID of the edge.
+        :param property_key: The key of the property to set or update.
+        :param value: The value to assign to the property.
+        :raises ValueError: If the edge does not exist in the graph.
+        """
+        # Find the edge by OID
+        edge = self.get_edge(oid)
+
+        # Set or update the property in the edge's properties dictionary
+        edge['data'].properties[property_key] = value
+
+        # Mark the graph as updated
+        self.set_updated()
+        edge['data'].notify()
+
+        print(f"Property '{property_key}' set to '{value}' for Edge {oid}.")
+
     def set_updated(self, value=True):
         self.updated = value
 
     def add_node(self, node):
         self.graph.add_node(node.oid, data=node)
-        print("Adding node with:", node.label, node.start_time, node.oid)
+        print("Adding node with:", node.label, node.oid)
         self.set_updated()
 
     def add_edge(self, edge):
@@ -321,9 +598,18 @@ class HyGraph:
         return self.graph.nodes[oid]
 
     def get_edge(self, oid):
-        if oid not in self.graph.edges:
-            raise ValueError(f"Edge with ID {oid} does not exist.")
-        return self.graph.edges[oid]
+        """
+        Retrieve an edge from the graph using its Object ID (oid).
+        """
+        # Iterate through all edges in the graph
+        for u, v, key, edge_data in self.graph.edges(data=True, keys=True):
+            # If the edge's Object ID matches the requested oid, return the edge
+            if key == oid:
+                return edge_data
+
+        # Raise an error if the edge with the given oid is not found
+        raise ValueError(f"Edge with ID {oid} does not exist.")
+
 
     def get_time_series(self, tsid):
         if tsid not in self.time_series:

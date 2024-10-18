@@ -1,3 +1,9 @@
 pandas
 networkx
 numpy
+watchdog
+xarray
+fastdtw
+scipy
+igraph
+matplotlib
