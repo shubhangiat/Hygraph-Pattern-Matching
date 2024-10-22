@@ -7,119 +7,14 @@ from numpy.lib.utils import source
 from scipy.spatial.distance import euclidean
 from datetime import datetime, timedelta
 from igraph import Graph as IGraph
+
+from hygraph_core.graph_operators import Edge, TSNode, PGNode, PGEdge, TSEdge
+from hygraph_core.timeseries_operators import TimeSeries, TimeSeriesMetadata
 from idGenerator import IDGenerator
 from oberserver import Subject
 FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
 from constraints import parse_datetime
 
-class Node(Subject):
-    def __init__(self, oid, label, node_id=None):
-        super().__init__()  # Initialize the Subject
-        self.oid = oid
-        self.node_id = node_id  # External ID from CSV file
-        self.label = label
-        self.membership = None
-    def __repr__(self):
-        return f"Node(oid={self.oid}, label={self.label}, membership={self.membership})"
-
-    def get_type(self):
-        """
-        Returns the type of node. Should be overridden by subclasses.
-        """
-        return "Node"
-class PGNode(Node):
-    def __init__(self, oid, label, start_time, end_time=None, node_id=None):
-        super().__init__(oid, label,node_id)
-        self.start_time = start_time
-        self.end_time = end_time
-        self.properties = {}
-    def __repr__(self):
-        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
-        base_str = super().__repr__()
-        return f"{base_str}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }}"
-
-    def get_type(self):
-        return "PGNode"
-
-class TSNode(Node):
-    def __init__(self, oid, label,time_series):
-        super().__init__(oid, label)
-        self.series = time_series
-    def __repr__(self):
-        base_str = super().__repr__()
-        return f"{base_str}, series={self.series}"
-    def get_type(self):
-        return "TSNode"
-class Edge(Subject):
-    def __init__(self, oid, source, target, label, start_time, end_time=None, edge_id=None):
-        super().__init__()
-        self.oid = oid
-        self.source = source
-        self.target = target
-        self.label = label
-        self.edge_id = edge_id  # External ID from CSV file
-        self.start_time = start_time
-        self.end_time = end_time
-        self.properties = {}
-        self.membership = None
-    def __repr__(self):
-        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
-        return f"Edge(oid={self.oid}, source={self.source}, target={self.target}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, membership={self.membership} properties={{ {properties_str} }})"
-
-class PGEdge(Edge):
-    def __init__(self, oid, source, target, label, properties, start_time, end_time=None, edge_id=None):
-        super().__init__(oid, source, target, label, start_time, end_time, edge_id)
-        self.properties = properties
-    def __repr__(self):
-        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
-        base_str = super().__repr__()
-        return f"{base_str}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }}"
-
-class TSEdge(Edge):
-    def __init__(self, oid, source, target, label, start_time, time_series, end_time=None, edge_id=None):
-        super().__init__(oid, source, target, label, start_time, end_time, edge_id)
-        self.series = time_series
-    def __repr__(self):
-        base_str = super().__repr__()
-        return f"{base_str}, series={self.series}"
-class TimeSeriesMetadata:
-    def __init__(self, owner_id, label='', element_type='', attribute=''):
-        self.owner_id = owner_id
-        self.label = label
-        self.element_type = element_type
-
-class TimeSeries:
-    """
-     Create and add a multivariate time series to the graph.
-     :param tsid: Time series ID
-     :param timestamps: List of timestamps
-     :param variables: List of variable names
-     :param data: 2D array-like structure with data
-     """
-    def __init__(self, tsid, timestamps, variables, data, metadata=None):
-        self.tsid = tsid
-        time_index = pd.to_datetime(timestamps)
-        self.data = xr.DataArray(data, coords=[time_index, variables], dims=['time', 'variable'], name=f'ts_{tsid}')
-        self.metadata = metadata if metadata is not None else {}
-
-    def append_data(self, date, value):
-        date = pd.to_datetime(date)
-        new_data = xr.DataArray([[value]], coords=[[date], self.data.coords['variable']], dims=['time', 'variable'])
-        self.data = xr.concat([self.data, new_data], dim='time')
-
-class Subgraph(Subject):
-    def __init__(self, subgraph_id, label, start_time, end_time=None, filter_func=None):
-        super().__init__()
-        self.subgraph_id = subgraph_id
-        self.label = label
-        self.start_time = start_time
-        self.end_time = end_time
-        self.properties = {}
-        self.filter_func = filter_func
-
-    def __repr__(self):
-        properties_str = ', '.join(f"{k}: {v}" for k, v in self.properties.items())
-        return f"Subgraph(id={self.subgraph_id}, label={self.label}, start_time={self.start_time}, end_time={self.end_time}, properties={{ {properties_str} }})"
 
 
 class HyGraph:
@@ -621,6 +516,27 @@ class HyGraph:
             raise ValueError(f"Subgraph with ID {subgraph_id} does not exist.")
         return self.subgraphs[subgraph_id]
 
+    def add_time_series(self, timestamps, variables, data, metadata=None):
+        """
+        Add a new time series to the hygraph.
+
+        :param timestamps: List of timestamps for the time series
+        :param variables: List of variables for the time series
+        :param data: 2D array-like structure with data corresponding to timestamps and variables
+        :param metadata: Optional metadata for the time series
+        :return: The ID of the newly created time series
+        """
+        # Generate a new time series ID
+        time_series_id = self.id_generator.generate_timeseries_id()
+
+        # Create the time series
+        new_time_series = TimeSeries(time_series_id, timestamps, variables, data, metadata)
+
+        # Store the time series in the hygraph
+        self.time_series[time_series_id] = new_time_series
+
+        print(f"New time series added with ID {time_series_id}")
+        return time_series_id
     def create_similarity_edges(self, similarity_threshold):
         ts_nodes = [node for node in self.graph.nodes(data=True) if isinstance(node[1]['data'], TSNode)]
         edge_id = self.id_generator.generate_edge_id()
@@ -718,7 +634,7 @@ class HyGraph:
             raise ValueError("Unsupported element type for time series generation: {}".format(element_type))
 
     def filter_nodes(self, node_filter, edge_filter):
-        # This function now considers both node properties and edge connections
+        # This function now considers both node properties.py and edge connections
         filtered_nodes = []
         for node_id, node_data in self.graph.nodes(data=True):
             if node_filter(node_data):
@@ -734,25 +650,25 @@ class HyGraph:
 
     def process_element_for_time_series(self, element_data, ts_config, element_type='node'):
         element = element_data['data']
-        start_date = ts_config['start_date']
-        end_date = ts_config.get('end_date', None)
+        #  start_date = ts_config['start_date']
+        #end_date = ts_config.get('end_date', None)
         attribute = ts_config['attribute']
         aggregate_function = ts_config['aggregate_function']
-        freq = ts_config.get('freq', 'D')
+        #freq = ts_config.get('freq', 'D')
         element_start_time = parse_datetime(element.start_time) if isinstance(element.start_time, str) else element.start_time
         element_end_time = parse_datetime(element.end_time) if isinstance(element.end_time, str) else element.end_time
         # Check if the element is within the time range
-        if pd.isna(end_date):
-            end_date =datetime.now()
-        if not (element_start_time <= end_date and element_end_time >= start_date):
-            print(f"Skipping {element_type} {element.oid} as it is outside the query time range.")
-            return
-        date_range = pd.date_range(start=start_date, end=end_date, freq=freq)
+        #if pd.isna(end_date):
+        #   end_date =datetime.now()
+        #if not (element_start_time <= end_date and element_end_time >= start_date):
+        #   print(f"Skipping {element_type} {element.oid} as it is outside the query time range.")
+        #   return
+        #date_range = pd.date_range(start=start_date, end=end_date, freq=freq)
         values = []
         last_value = None
-        for date in date_range:
-            current_value = aggregate_function(self, element_type, element.oid, attribute, date)
-            values.append((date, current_value))
+        # for date in date_range:
+        #   current_value = aggregate_function(self, element_type, element.oid, attribute, date)
+        #   values.append((date, current_value))
         if values:
             timestamps, data_values = zip(*values)
             reshaped_data_values = np.array(data_values)[:, np.newaxis]

@@ -40,7 +40,7 @@ if __name__ == "__main__":
     # Define a condition to filter edges
     def node_filter(node):
         node_obj = node['data']
-        print("node filter here ok : ",int(node_obj.properties.get('age', 0)) > 14)
+        print("node filter here ok : ", int(node_obj.properties.get('age', 0)) > 14)
         return node_obj.label == 'Person' and int(node_obj.properties.get('age', 0)) > 14
 
     def edge_filter(edge):
@@ -77,4 +77,14 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("Batch processing terminated.")
             break
+
+
+#out of files :
+    # Sample data for time series
+    timestamps = ['2024-10-01', '2024-10-02', '2024-10-03']
+    variables = ['temperature']
+    data = [[25], [27], [28]]
+
+    # Add a time series in the hygraph
+    graph_element.add_temporal_property('temperature', timestamps, variables, data)
 

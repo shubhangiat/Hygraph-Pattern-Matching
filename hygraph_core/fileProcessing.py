@@ -217,7 +217,7 @@ class EdgeFileHandler(FileSystemEventHandler):
                     if external_edge_id == existing_edge.edge_id:
                         edge_exists = True
                         print('add property, element ', existing_edge.properties)
-                        # Update the existing edge properties and external ID if they differ
+                        # Update the existing edge properties.py and external ID if they differ
                         if existing_edge.properties != edge_properties or existing_edge.edge_id != external_edge_id:
 
                             existing_edge.properties.update(edge_properties)
