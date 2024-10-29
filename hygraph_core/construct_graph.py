@@ -1,3 +1,5 @@
+from hygraph_core.hygraph import HyGraph
+from hygraph_core.timeseries_operators import TimeSeriesMetadata
 
 
 def build_timeseries_similarity_graph(time_series_list, threshold, hygraph=None, similarity_metric='euclidean', edge_type='PGEdge', additional_option=None):
