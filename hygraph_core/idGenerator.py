@@ -1,5 +1,6 @@
 import uuid
 
+
 class IDGenerator:
     def generate_node_id(self):
         return str(uuid.uuid4())
@@ -13,6 +14,8 @@ class IDGenerator:
     def generate_timeseries_id(self):
         return str(uuid.uuid4())
 
+
+'''
 def process_subgraph_batches(self):
     # Create a dictionary to store subgraph start times
     subgraph_start_times = {}
@@ -101,4 +104,4 @@ def process_subgraph_batches(self):
                     timestamps.append(subgraph_start_times[ts])
                     subgraph_ids.append(ts)
 
-                self.hygraph.update_membership(edge, timestamps, subgraph_ids)
+                self.hygraph.update_membership(edge, timestamps, subgraph_ids) '''

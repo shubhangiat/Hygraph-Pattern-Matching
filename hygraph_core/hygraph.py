@@ -7,14 +7,15 @@ from numpy.lib.utils import source
 from scipy.spatial.distance import euclidean
 from datetime import datetime, timedelta
 from igraph import Graph as IGraph
-
-from hygraph_core.graph_operators import Edge, TSNode, PGNode, PGEdge, TSEdge
+from collections import deque
+from collections import defaultdict
+from hygraph_core.graph_operators import Edge, TSNode, PGNode, PGEdge, TSEdge, Subgraph, TemporalProperty, \
+    StaticProperty
 from hygraph_core.timeseries_operators import TimeSeries, TimeSeriesMetadata
-from idGenerator import IDGenerator
-from oberserver import Subject
-FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
-from constraints import parse_datetime
+from hygraph_core.idGenerator import IDGenerator
 
+FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
+from hygraph_core.constraints import parse_datetime
 
 
 class HyGraph:
@@ -26,319 +27,247 @@ class HyGraph:
         self.updated = False  # Flag to track updates
         self.query =None
 
-    def add_pg_node(self, oid, label, start_time, end_time=None, properties=None):
+    #create
+    def add_pgedge(self, oid, source, target, label, start_time,end_time=None, properties=None, membership=None):
         """
-        Add a new PGNode to the graph with specified properties.
+        Adds a PGEdge to the Hygraph, supporting both static and temporal properties, and membership.
 
-        :param oid: Object ID of the node.
-        :param label: Label for the node.
-        :param start_time: Start time for the node.
-        :param end_time: End time for the node (optional).
-        :param properties: A dictionary of properties to assign to the node.
+        :param oid: Edge identifier
+        :param source: Source node of the edge
+        :param target: Target node of the edge
+        :param label: Edge label
+        :param start_time: Start time for PGEdge
+        :param end_time: End time (optional)
+        :param properties: Dictionary of static and temporal properties. Temporal properties should be TimeSeries instances.
+        :param membership: Timeseries object representing the membership information.
         """
-        # Create a new PGNode instance
-        pg_node = PGNode(oid, label, start_time, end_time)
+        # Step 1: Check if source and target nodes exist
+        if not self.graph.has_node(source):
+            raise ValueError(f"Source node {source} does not exist.")
+        if not self.graph.has_node(target):
+            raise ValueError(f"Target node {target} does not exist.")
 
-        # Add any specified properties to the node
+        # Step 2: Create the PGEdge instance
+        if end_time is None: end_time=FAR_FUTURE_DATE
+        pgedge = PGEdge(oid, source,target,label, start_time, end_time,self)
+
+        # Step 3: Add static and temporal properties
         if properties:
-            pg_node.properties.update(properties)
+            for prop_name, prop_value in properties.items():
+                if isinstance(prop_value, TimeSeries):  # It's a temporal property
+                    pgedge.add_temporal_property(prop_name, prop_value,self)
+                else:
+                    pgedge.add_static_property( prop_name, prop_value,self)
 
-        # Add the node to the graph
-        self.add_node(pg_node)
+        # Step 4: Add membership (if it exists)
+        if membership and isinstance(membership, TimeSeries):
+            pgedge.membership = membership.tsid  # Store the timeseries ID for membership
+            self.time_series[membership.tsid] = membership  # Add membership timeseries to hygraph storage
 
-        print(f"PGNode {oid} added with label '{label}' and properties {pg_node.properties}")
+        # Step 5: Add the edge to the networkx graph
+        self.graph.add_edge(source, target,
+                            key=oid,
+                            oid=oid,
+                            label=label,
+                            start_time=start_time,
+                            end_time=end_time,
+                            properties={**pgedge.static_properties, **pgedge.temporal_properties},
+                            # Merging static and temporal properties
+                            membership=pgedge.membership,
+                            data=pgedge,
+                            type="PGEdge")
 
-        return pg_node
-
-    def add_ts_node(self, oid, label, time_series):
-        """
-        Add a new TSNode (Time Series Node) to the graph with a time series and label.
-
-        :param oid: Object ID of the node.
-        :param label: Label for the node.
-        :param time_series: Time series data to attach to the node.
-        """
-        # Create a new TSNode instance
-        ts_node = TSNode(oid, label, time_series)
-
-        # Add the node to the graph
-        self.add_node(ts_node)
-
-        print(f"TSNode {oid} added with label '{label}' and time series data {time_series}")
-
-        return ts_node
-
-    def remove_node(self, oid):
-        """
-        Delete a node from the graph.
-
-        :param oid: The Object ID of the node to be deleted.
-        :raises ValueError: If the node does not exist in the graph.
-        """
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
-
-        # Remove the node from the graph
-        self.graph.remove_node(oid)
-
-        # Notify that the graph has been updated
+        print(f"PGEdge {oid} from {source} to {target} with label '{label}' successfully created.")
+        # Mark the graph as updated
         self.set_updated()
+        # Update node degree time series
+        self._update_node_degree_time_series(source, target, operation='add', timestamp=start_time)
 
-        print(f"Node {oid} has been removed from the graph.")
+        return pgedge
 
-    def update_node_properties(self, oid, properties):
+    def add_pgnode(self, oid, label, start_time, end_time=None, properties=None, membership=None):
         """
-        Update the properties of an existing node in the graph.
+        Adds a PGNode to the Hygraph, supporting both static and temporal properties, and membership.
 
-        :param oid: The Object ID of the node to be updated.
-        :param properties: A dictionary containing the new or updated properties for the node.
-        :raises ValueError: If the node does not exist in the graph.
+        :param oid: Node identifier
+        :param label: Node label
+        :param start_time: Start time for PGNode
+        :param end_time: End time (optional)
+        :param properties: Dictionary of static and temporal properties. Temporal properties should be TimeSeries instances.
+        :param membership: Timeseries object representing the membership information.
         """
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
+        # Step 1: Create the PGNode instance
+        if end_time is None : end_time=FAR_FUTURE_DATE
+        pgnode = PGNode(oid, label, start_time, end_time, oid,self)
 
-        # Get the node from the graph
-        node = self.graph.nodes[oid]['data']
+        # Step 2: Add static and temporal properties
+        if properties:
+            for prop_name, prop_value in properties.items():
+                if isinstance(prop_value, TimeSeries):  # It's a temporal property
+                     pgnode.add_temporal_property (prop_name, prop_value,self)
+                else:
+                    pgnode.add_static_property(prop_name, prop_value,self)
 
-        # Update the node's properties with the new values
-        node.properties.update(properties)
-
-        # Notify that the graph has been updated
+        # Step 3: Add membership (if it exists)
+        if membership and isinstance(membership, TimeSeries):
+            pgnode.membership = membership.tsid  # Store the timeseries ID for membership
+            self.time_series[membership.tsid] = membership  # Add membership timeseries to hygraph storage
+            # Initialize in_degree and out_degree time series to 0 at start_time
+        for degree_type in ['in_degree', 'out_degree']:
+            tsid = self.id_generator.generate_timeseries_id()
+            metadata = TimeSeriesMetadata(owner_id=oid, element_type='node')
+            initial_degree_ts = TimeSeries(tsid=tsid, timestamps=[start_time], variables=[degree_type], data=[[0]],
+                                           metadata=metadata)
+            self.time_series[tsid] = initial_degree_ts
+            pgnode.add_temporal_property(degree_type, initial_degree_ts, self)
+            # Add a print statement to confirm creation
+            print(f"Initialized {degree_type} for node {oid} with timestamp {start_time} and initial value 0")
+        # Step 4: Add the node to the networkx graph
+        self.graph.add_node(oid,
+                            label=label,
+                            start_time=start_time,
+                            end_time=end_time,
+                            properties={**pgnode.static_properties, **pgnode.temporal_properties},
+                            # Merging static and temporal properties
+                            membership=pgnode.membership,
+                            data=pgnode,
+                            type="PGNode")
+        # Mark the graph as updated
         self.set_updated()
+        print(f"PGNode {oid} with label '{label}' successfully created and end_time '{pgnode.end_time}'.")
 
-        print(f"Node {oid} properties updated: {properties}")
 
-        # Notify observers if needed
-        node.notify()
+        return pgnode
 
-    def get_node_property(self, oid, property_key):
+    def add_tsnode(self, oid, label, time_series):
         """
-        Retrieve a specific property from a node.
+        Adds a TSNode to the Hygraph. TSNode only has a timeseries and a label, no static properties.
 
-        :param oid: Object ID of the node.
-        :param property_key: The key of the property to retrieve.
-        :return: The value of the property, or None if the property does not exist.
-        :raises ValueError: If the node does not exist in the graph.
+        :param oid: Node identifier
+        :param label: Node label
+        :param time_series: Timeseries object representing the time series for this node.
         """
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
+        # Step 1: Create the TSNode instance
+        tsnode = TSNode(oid, label, time_series,self)
 
-        # Get the node from the graph
-        node = self.graph.nodes[oid]['data']
+        # Step 2: Add the timeseries to Hygraph storage
+        self.time_series[time_series.tsid] = time_series
+        start_time = time_series.first_timestam()
+        # Initialize in_degree and out_degree time series to 0 at start_time
+        for degree_type in ['in_degree', 'out_degree']:
+            tsid = self.id_generator.generate_timeseries_id()
+            metadata = TimeSeriesMetadata(owner_id=oid, element_type='node')
+            initial_degree_ts = TimeSeries(tsid=tsid, timestamps=[start_time], variables=[degree_type], data=[[0]],
+                                           metadata=metadata)
+            self.time_series[tsid] = initial_degree_ts
+            tsnode.add_temporal_property(degree_type, initial_degree_ts, self)
+            # Add a print statement to confirm creation
+            print(f"Initialized {degree_type} for node {oid} with timestamp {start_time} and initial value 0")
 
-        # Retrieve the property if it exists
-        return node.properties.get(property_key, None)
-
-    def set_node_property(self, oid, property_key, value):
-        """
-        Set or update a specific property of a node.
-
-        :param oid: Object ID of the node.
-        :param property_key: The key of the property to set or update.
-        :param value: The value to assign to the property.
-        :raises ValueError: If the node does not exist in the graph.
-        """
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
-
-        # Get the node from the graph
-        node = self.graph.nodes[oid]['data']
-
-        # Set or update the property
-        node.properties[property_key] = value
-
-        # Notify that the graph has been updated
-        self.set_updated()
-        node.notify()
-
-        print(f"Property '{property_key}' set/updated to '{value}' for Node {oid}.")
-
-    def add_pg_edge(self, oid, source_oid, target_oid, label, start_time, end_time=None, properties=None):
-        """
-        Add a new PGEdge to the graph with specified properties.
-
-        :param oid: Object ID of the edge.
-        :param source_oid: The Object ID of the source node.
-        :param target_oid: The Object ID of the target node.
-        :param label: The label of the edge.
-        :param start_time: The start time of the edge.
-        :param end_time: The end time of the edge (optional).
-        :param properties: A dictionary of additional properties for the edge (optional).
-        :raises ValueError: If the source or target node does not exist in the graph.
-        """
-        # Ensure the source and target nodes exist
-        if source_oid not in self.graph.nodes:
-            raise ValueError(f"Source node with ID {source_oid} does not exist.")
-        if target_oid not in self.graph.nodes:
-            raise ValueError(f"Target node with ID {target_oid} does not exist.")
-
-        if not properties:
-            properties = {}
-
-        # Create a new PGEdge instance
-        pg_edge = PGEdge(oid, source_oid, target_oid, label, properties, start_time, end_time)
-
-        # Add the edge to the graph
-        self.graph.add_edge(source_oid, target_oid, key=pg_edge.oid, data=pg_edge)
-
+        # Step 3: Add the node to the networkx graph
+        self.graph.add_node(oid,
+                            label=label,
+                            series=time_series.tsid,  # Store only the timeseries ID in the node
+                            data=tsnode,
+                            type="TSNode")
+        print(f"TSNode {oid} with label '{label}' successfully created.")
         # Mark the graph as updated
         self.set_updated()
 
-        print(
-            f"PGEdge {oid} added between Node {source_oid} and Node {target_oid} with label '{label}' and properties {pg_edge.properties}")
 
-        return pg_edge
+        return tsnode
 
-    def add_ts_edge(self, oid, source_oid, target_oid, label, time_series, start_time, end_time=None):
+    def add_tsedge(self, oid, source, target, label, time_series):
         """
-        Add a new TSEdge to the graph with a time series and label.
+        Adds a TSEdge to the Hygraph. TSEdge only has a timeseries and a label, no static properties.
 
-        :param oid: Object ID of the edge.
-        :param source_oid: The Object ID of the source node.
-        :param target_oid: The Object ID of the target node.
-        :param label: The label of the edge.
-        :param time_series: The time series data to attach to the edge.
-        :raises ValueError: If the source or target node does not exist in the graph.
+        :param oid: Edge identifier
+        :param source: Source node of the edge
+        :param target: Target node of the edge
+        :param label: Edge label
+        :param time_series: Timeseries object representing the time series for this edge.
         """
-        # Ensure the source and target nodes exist
-        if source_oid not in self.graph.nodes:
-            raise ValueError(f"Source node with ID {source_oid} does not exist.")
-        if target_oid not in self.graph.nodes:
-            raise ValueError(f"Target node with ID {target_oid} does not exist.")
+        # Step 1: Check if source and target nodes exist
+        if not self.graph.has_node(source):
+            raise ValueError(f"Source node {source} does not exist.")
+        if not self.graph.has_node(target):
+            raise ValueError(f"Target node {target} does not exist.")
 
-        # Create a new TSEdge instance
-        ts_edge = TSEdge(oid, source_oid, target_oid, label, start_time, time_series)
+        # Step 2: Create the TSEdge instance
+        tsedge = TSEdge (oid, label, time_series,self)
 
-        # Add the edge to the graph
-        self.graph.add_edge(source_oid, target_oid, key=ts_edge.oid, data=ts_edge)
+        # Step 3: Add the timeseries to Hygraph storage
+        self.time_series[time_series.tsid] = time_series
 
+        # Step 4: Add the edge to the networkx graph
+        self.graph.add_edge(source, target,
+                            key=oid,
+                            oid=oid,
+                            label=label,
+                            series=time_series.tsid,  # Store only the timeseries ID in the edge
+                            start_time=time_series.first_timestamp(),
+                            end_time=time_series.last_timestamp(),
+                            data=tsedge,
+                            type="TSEdge")
+
+        print(f"TSEdge {oid} from {source} to {target} with label '{label}' successfully created.")
         # Mark the graph as updated
         self.set_updated()
+        start_time=time_series.first_timestamp()
+        # Update node degree time series
+        self._update_node_degree_time_series(tsedge.source, tsedge.target, operation='add', timestamp=start_time)
 
-        print(f"TSEdge {oid} added between Node {source_oid} and Node {target_oid} with label '{label}' and time series data.")
+        return tsedge
 
-        return ts_edge
-
-    def remove_edge(self, oid):
+    def add_subgraph(self, subgraph_id, label=None, static_properties=None, start_time=None, end_time=None,temporal_properties=None,
+                        node_filter=None, edge_filter=None):
         """
-        Remove an edge from the graph.
+        Create a subgraph based on node and edge filters, and store it in the subgraphs dictionary.
 
-        :param oid: The Object ID of the edge to be deleted.
-        :raises ValueError: If the edge does not exist in the graph.
+        :param subgraph_id: Identifier for the subgraph.
+        :param label: Label for the subgraph.
+        :param static_properties: Dictionary of static properties for the subgraph.
+        :param temporal_properties: Dictionary of temporal properties for the subgraph.
+        :param node_filter: Function that takes (node_id, data) and returns True if the node should be included.
+        :param edge_filter: Function that takes (u, v, key, data) and returns True if the edge should be included.
         """
-        # Find the edge by OID
-        edge = self.get_edge(oid)
+        # Check if subgraph_id already exists
+        if subgraph_id in self.subgraphs:
+            raise ValueError(f"Subgraph with ID '{subgraph_id}' already exists.")
+        if end_time is None: end_time = FAR_FUTURE_DATE
+        # Create a subgraph view using NetworkX's subgraph_view
+        subgraph_view = nx.subgraph_view(
+            self.graph,
+            filter_node=lambda n: node_filter(n, self.graph.nodes[n]) if node_filter else True,
+            filter_edge=lambda u, v, k: edge_filter(u, v, k, self.graph.edges[u, v, k]) if edge_filter else True
+        )
 
-        # Mark the graph as updated
-        self.set_updated()
+        # Create a Subgraph object with label and properties
+        subgraph_obj = Subgraph(
+            subgraph_id,
+            label or f"Subgraph {subgraph_id}",
+            static_properties or {},
+            temporal_properties or {},
+            start_time or datetime.now(),
+            end_time  ,self
+        )
 
-        print(f"Edge {oid} has been removed from the graph.")
+        # Store the subgraph view and Subgraph object in the subgraphs dictionary
+        self.subgraphs[subgraph_id] = {
+            'view': subgraph_view,  # The NetworkX subgraph view
+            'data': subgraph_obj,  # The Subgraph object with label and properties
+            'created_at': datetime.now()  # Timestamp of creation
+        }
 
-    def update_edge_properties(self, oid, properties):
-        """
-        Update the properties of an existing edge in the graph.
-
-        :param oid: Object ID of the edge.
-        :param properties: A dictionary containing the new or updated properties for the edge.
-        :raises ValueError: If the edge does not exist in the graph.
-        """
-        # Find the edge by OID
-        edge = self.get_edge(oid)
-
-        # Update the edge's properties with the new values
-        edge["data"].properties.update(properties)
-
-        # Mark the graph as updated
-        self.set_updated()
-
-        # Notify observers
-        edge["data"].notify()
-
-        print(f"Edge {oid} properties updated: {properties}")
-
-
-    def get_edge_property(self, oid, property_key):
-        """
-        Retrieve a specific property from an edge.
-
-        :param oid: Object ID of the edge.
-        :param property_key: The key of the property to retrieve.
-        :return: The value of the property, or None if the property does not exist.
-        :raises ValueError: If the edge does not exist in the graph.
-        """
-        # Find the edge by OID
-        edge = self.get_edge(oid)
-
-        # Retrieve the property if it exists
-        return edge["data"].properties.get(property_key, None)
-
-    def set_edge_property(self, oid, property_key, value):
-        """
-        Set or update a specific property of an edge.
-
-        :param oid: Object ID of the edge.
-        :param property_key: The key of the property to set or update.
-        :param value: The value to assign to the property.
-        :raises ValueError: If the edge does not exist in the graph.
-        """
-        # Find the edge by OID
-        edge = self.get_edge(oid)
-
-        # Set or update the property in the edge's properties dictionary
-        edge['data'].properties[property_key] = value
-
-        # Mark the graph as updated
-        self.set_updated()
-        edge['data'].notify()
-
-        print(f"Property '{property_key}' set to '{value}' for Edge {oid}.")
+        print(f"Subgraph '{subgraph_id}' created and stored.")
+        return subgraph_view
 
     def set_updated(self, value=True):
         self.updated = value
 
-    def add_node(self, node):
-        self.graph.add_node(node.oid, data=node)
-        print("Adding node with:", node.label, node.oid)
-        self.set_updated()
 
-    def add_edge(self, edge):
-        self.graph.add_edge(edge.source, edge.target, key=edge.oid, data=edge)
-        print("Adding edge with:", edge.label, edge.start_time, edge.oid)
-        self.set_updated()
 
-    def add_subgraph(self, subgraph):
-        print(f"Adding subgraph with ID: {subgraph.subgraph_id}")
-        subgraph_view = nx.subgraph_view(self.graph, filter_node=subgraph.filter_func, filter_edge=subgraph.filter_func)
-        self.subgraphs[subgraph.subgraph_id] = {'view': subgraph_view, 'data': subgraph}
 
-    def delete_node(self, oid, end_time=None):
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
-
-        node = self.get_element('node', oid)
-        end_time = end_time or datetime.now()
-        node.end_time = end_time
-
-        # Notify observers
-        self.set_updated()
-        node.notify()
-
-    def delete_edge(self, oid, end_time=None):
-        edge = None
-        for u, v, key in self.graph.edges(keys=True):
-            if key == oid:
-                edge = self.graph.edges[u, v, key]['data']
-                break
-
-        if edge is None:
-            raise ValueError(f"Edge with ID {oid} does not exist.")
-
-        end_time = end_time or datetime.now()
-        edge.end_time = end_time
-
-        # Notify observers
-        self.set_updated()
-        edge.notify()
 
     def add_query(self, query):
         """
@@ -487,34 +416,6 @@ class HyGraph:
             print(
                 f"Added subgraph membership to {type(element).__name__.lower()} {element.oid} with time series ID {tsid}.")
 
-    def get_node(self, oid):
-        if oid not in self.graph.nodes:
-            raise ValueError(f"Node with ID {oid} does not exist.")
-        return self.graph.nodes[oid]
-
-    def get_edge(self, oid):
-        """
-        Retrieve an edge from the graph using its Object ID (oid).
-        """
-        # Iterate through all edges in the graph
-        for u, v, key, edge_data in self.graph.edges(data=True, keys=True):
-            # If the edge's Object ID matches the requested oid, return the edge
-            if key == oid:
-                return edge_data
-
-        # Raise an error if the edge with the given oid is not found
-        raise ValueError(f"Edge with ID {oid} does not exist.")
-
-
-    def get_time_series(self, tsid):
-        if tsid not in self.time_series:
-            raise ValueError(f"Time series with ID {tsid} does not exist.")
-        return self.time_series[tsid].data
-
-    def get_subgraph(self, subgraph_id):
-        if subgraph_id not in self.subgraphs:
-            raise ValueError(f"Subgraph with ID {subgraph_id} does not exist.")
-        return self.subgraphs[subgraph_id]
 
     def add_time_series(self, timestamps, variables, data, metadata=None):
         """
@@ -528,15 +429,289 @@ class HyGraph:
         """
         # Generate a new time series ID
         time_series_id = self.id_generator.generate_timeseries_id()
-
         # Create the time series
+        if metadata ==None:
+            metadata = TimeSeriesMetadata(-1)
         new_time_series = TimeSeries(time_series_id, timestamps, variables, data, metadata)
 
         # Store the time series in the hygraph
         self.time_series[time_series_id] = new_time_series
 
         print(f"New time series added with ID {time_series_id}")
-        return time_series_id
+        return new_time_series
+
+
+    #read
+    def get_node_by_id(self, oid):
+        """
+       Retrieve a node from the graph using its Object ID (oid).
+
+       :param oid: The Object ID of the node.
+       :return: the node if found.
+       :raises ValueError: If the node does not exist.
+       """
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+        return self.graph.nodes[oid]
+
+    def get_edge_by_id(self, oid):
+        """
+        Retrieve an edge from the graph using its Object ID (oid).
+
+        :param oid: The Object ID of the edge.
+        :return: A tuple (source, target, key, data) of the edge if found.
+        :raises ValueError: If the edge does not exist.
+        """
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if key == oid:
+                return (u, v, key, data)
+        raise ValueError(f"Edge with ID {oid} does not exist.")
+
+    def get_timeseries(self, tsid, display=False, limit=None, order='first'):
+        """
+        Retrieve and optionally display a time series by its ID.
+
+        :param tsid: The ID of the time series to retrieve.
+        :param display: If True, display the time series using its display method.
+        :param limit: Limit the number of data points to display.
+        :param order: 'first' or 'last' data points to display.
+        :return: The TimeSeries object.
+        """
+        if tsid not in self.time_series:
+            raise ValueError(f"Time series with ID {tsid} does not exist.")
+        ts = self.time_series[tsid]
+        if display:
+            ts.display_time_series(limit=limit, order=order)
+        return ts.data
+
+    def get_subgraph(self, subgraph_id):
+        if subgraph_id not in self.subgraphs:
+            raise ValueError(f"Subgraph with ID {subgraph_id} does not exist.")
+        return self.subgraphs[subgraph_id]
+
+    def display_subgraphs(self):
+        """
+        Display information about all subgraphs stored in the HyGraph.
+        """
+        print("\nSubgraphs:")
+        for subgraph_id, data in self.subgraphs.items():
+            subgraph_view = data['view']
+            subgraph_obj = data.get('data')
+            if subgraph_obj.end_time is None or subgraph_obj.end_time > datetime.now():
+                # Subgraph is active
+                num_nodes = subgraph_view.number_of_nodes()
+                num_edges = subgraph_view.number_of_edges()
+                label = subgraph_obj.label
+                print(
+                    f"Subgraph '{subgraph_id}': Label: {label}, {num_nodes} nodes, {num_edges} edges, created at {data['created_at']}")
+                # Display properties...
+            else:
+                # Subgraph is logically deleted
+                print(f"Subgraph '{subgraph_id}' is logically deleted as of {subgraph_obj.end_time}.")
+
+    def get_all_edges(self):
+        """
+        Return all edges in the graph.
+        """
+        return list(self.graph.edges(keys=True, data=True))
+
+    def get_all_tsedges(self):
+        """
+        Return all TSEdge instances in the graph.
+        """
+        tsedges = []
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if data.get('type') == 'TSEdge':
+                tsedges.append((u, v, key, data))
+        return tsedges
+
+    def get_all_pgedges(self):
+        """
+        Return all PGEdge instances in the graph.
+        """
+        pgedges = []
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if data.get('type') == 'PGEdge':
+                pgedges.append((u, v, key, data))
+        return pgedges
+
+    def get_all_nodes(self):
+        """
+        Return all nodes in the graph.
+        """
+        return list(self.graph.nodes(data=True))
+
+    def get_all_tsnodes(self):
+        """
+        Return all TSNode instances in the graph.
+        """
+        tsnodes = []
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get('type') == 'TSNode':
+                tsnodes.append((node_id, data))
+        return tsnodes
+
+    def get_all_pgnodes(self):
+        """
+        Return all PGNode instances in the graph.
+        """
+        pgnodes = []
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get('type') == 'PGNode':
+                pgnodes.append((node_id, data))
+        return pgnodes
+
+    def get_all_timeseries(self, display=False, limit=None, order='first'):
+        """
+        Retrieve and optionally display all time series in the HyGraph.
+
+        :param display: If True, display each time series using its display method.
+        :param limit: Limit the number of data points to display for each time series.
+        :param order: 'first' or 'last' data points to display.
+        :return: List of TimeSeries objects.
+        """
+        ts_list = list(self.time_series.values())
+        if display:
+            for ts in ts_list:
+                ts.display_time_series(limit=limit, order=order)
+        return ts_list
+
+    def get_all_subgraphs(self):
+        """
+        Return all subgraphs stored in the HyGraph.
+        """
+        return list(self.subgraphs.values())
+
+    def get_nodes_by_label(self, label):
+        """
+        Retrieve all nodes with the specified label.
+
+        :param label: The label to match.
+        :return: List of nodes matching the label.
+        """
+        nodes = []
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get('label') == label:
+                node_data = {key: value for key, value in data.items() if key != 'data'}
+                nodes.append((node_id, node_data))
+        return nodes
+
+    def get_nodes_by_static_property(self, property_name, condition):
+        """
+        Retrieve all nodes where the static property matches the given value.
+
+        :param property_name: The name of the static property.
+        :param value: The value to match.
+        :return: List of nodes matching the static property condition.
+        """
+        nodes = []
+        for node_id, data in self.graph.nodes(data=True):
+            # Access the properties dictionary
+            properties = data.get('properties', {})
+            # Now retrieve the relevant temporal property
+            static_prop = properties.get(property_name)
+
+            if not static_prop or not isinstance(static_prop, StaticProperty):
+                continue
+            print('here is static prop',static_prop)
+            if condition(static_prop):
+                node_data = {key: value for key, value in data.items() if key != 'data'}
+                nodes.append((node_id, node_data))
+        return nodes
+
+    def get_nodes_by_temporal_property(self, property_name, condition):
+        """
+        Retrieve all nodes where the temporal property satisfies the given condition.
+
+        :param property_name: The name of the temporal property.
+        :param condition: A function that takes a TimeSeries object and returns True if the condition is met.
+        :return: List of nodes matching the temporal property condition.
+        """
+        nodes = []
+        for node_id, data in self.graph.nodes(data=True):
+            # Access the properties dictionary
+            properties = data.get('properties', {})
+            # Now retrieve the relevant temporal property
+            temporal_prop = properties.get(property_name)
+
+            if temporal_prop and  isinstance(temporal_prop, TemporalProperty):
+                ts = temporal_prop.get_time_series()
+                if condition(ts):
+                    node_data = {key: value for key, value in data.items() if key != 'data'}
+                    nodes.append((node_id, node_data))
+        return nodes
+
+    def get_edges_by_label(self, label):
+        """
+        Retrieve all edges with the specified label.
+
+        :param label: The label to match.
+        :return: List of edges matching the label.
+        """
+        edges = []
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if data.get('label') == label:
+                edges.append((u, v, key, data))
+        return edges
+
+    #deletion
+
+    def delete_node(self, oid, end_time=None):
+        if oid not in self.graph.nodes:
+            raise ValueError(f"Node with ID {oid} does not exist.")
+
+        node = self.get_element('node', oid)
+        end_time = end_time or datetime.now()
+        node.end_time = end_time
+        print(f"Node {oid} logically deleted with end_time {node.end_time}.")
+        # Optionally, logically delete connected edges
+        for neighbor in self.graph.neighbors(oid):
+            for key in list(self.graph[oid][neighbor]):
+                self.delete_edge(key, end_time=end_time)
+
+        # Notify observers
+        self.set_updated()
+        node.notify()
+
+    def delete_edge(self, oid, end_time=None):
+        edge = None
+        for u, v, key in self.graph.edges(keys=True):
+            if key == oid:
+                edge = self.graph.edges[u, v, key]['data']
+                break
+
+        if edge is None:
+            raise ValueError(f"Edge with ID {oid} does not exist.")
+
+        end_time = end_time or datetime.now()
+        edge.end_time = end_time
+        print(f"Edge {oid} logically deleted with end_time {edge.end_time}.")
+
+        # Notify observers
+        self.set_updated()
+        edge.notify()
+        self._update_node_degree_time_series(edge.source, edge.target, operation='remove', timestamp=end_time)
+
+
+    def delete_subgraph(self, subgraph_id, end_time=None):
+        """
+        Logically delete a subgraph by setting its end_time.
+
+        :param subgraph_id: The ID of the subgraph to be logically deleted.
+        :param end_time: The end_time to set. If None, uses datetime.now().
+        """
+        if subgraph_id in self.subgraphs:
+            subgraph_data = self.subgraphs[subgraph_id]
+            subgraph_obj = subgraph_data.get('data')
+            if subgraph_obj:
+                # Set the end_time
+                subgraph_obj.end_time = end_time or datetime.now()
+                print(f"Subgraph '{subgraph_id}' logically deleted with end_time {subgraph_obj.end_time}.")
+            else:
+                print(f"Subgraph '{subgraph_id}' has no associated data object.")
+        else:
+            print(f"Subgraph '{subgraph_id}' does not exist.")
+
     def create_similarity_edges(self, similarity_threshold):
         ts_nodes = [node for node in self.graph.nodes(data=True) if isinstance(node[1]['data'], TSNode)]
         edge_id = self.id_generator.generate_edge_id()
@@ -566,7 +741,177 @@ class HyGraph:
         else:
             raise ValueError(f"Time series with ID {tsid} does not exist.")
 
+    def find_path(self, source_id, target_id, method='dijkstra', weight_property=None):
+        """
+        Finds a path between two nodes in HyGraph using the specified method.
 
+        :param hygraph: HyGraph instance.
+        :param source_id: ID of the source node.
+        :param target_id: ID of the target node.
+        :param method: Pathfinding method ('bfs', 'dfs', 'astar').
+        :param weight_property: Property for edge weights (for 'astar' only).
+        :param max_length: Maximum path length (cutoff for BFS/DFS).
+        :return: Dictionary with path nodes and edges.
+        """
+        # Choose pathfinding algorithm
+        if method == 'astar':
+            if not weight_property:
+                raise ValueError("A* method requires a weight property.")
+            path_nodes = nx.astar_path(self.graph, source=source_id, target=target_id, weight=weight_property)
+        elif method == 'dijkstra':
+            path_nodes = nx.shortest_path(self.graph, source=source_id, target=target_id, method="dijkstra")
+        else:
+            raise ValueError("Method must be 'bfs', 'dfs', or 'astar'.")
+
+        # Collect nodes and edges along the path
+        if path_nodes:
+            path_edges = [
+                self.graph.get_edge_data(u, v)['data']
+                for u, v in path_nodes
+            ]
+            path_data = {
+                "nodes": [self.graph.nodes[n]['data'] for n in [source_id] + [v for u, v in path_nodes]],
+                "edges": path_edges
+            }
+            return path_data
+        else:
+            return {"nodes": [], "edges": []}
+
+    def get_node_degree_over_time(self, node_id, degree_type='both', return_type='history'):
+        """
+        Retrieve the node degree over time.
+
+        :param node_id: ID of the node
+        :param degree_type: 'in', 'out', or 'both'
+        :param return_type: 'history' or 'current'
+        :return: Degree time series or current degree value
+        """
+        node = self.graph.nodes[node_id]['data']
+
+        degrees = []
+
+        if degree_type in ['in', 'both']:
+            in_degree_ts = node.get_temporal_property('in_degree')
+            degrees.append(in_degree_ts)
+
+        if degree_type in ['out', 'both']:
+            out_degree_ts = node.get_temporal_property('out_degree')
+            degrees.append(out_degree_ts)
+
+        if degrees:
+            if return_type == 'history':
+                # Merge the time series
+                combined_ts = TimeSeries.aggregate_multiple(degrees, method='sum')
+                return combined_ts
+            elif return_type == 'current':
+                # Return the latest degree value
+                current_degree = sum(ts.last_value()[1] for ts in degrees)
+                return current_degree
+        else:
+            return None  # No degree information available
+
+
+    def batch_process(self):
+        """Batch processing function to process all nodes and edges."""
+        print("Starting batch processing...")
+        self.create_time_series_from_graph(self.query)  # Update time series for all nodes and edges
+        print("Batch processing completed.")
+
+    def display(self):
+        print("Nodes:")
+        for node_id, data in self.graph.nodes(data=True):
+            print(f"Node {node_id}: {data}")
+
+        print("\nEdges:")
+        for source, target, key, data in self.graph.edges(keys=True, data=True):
+            print(f"Edge {key} from {source} to {target}: {data['data']}")
+
+        print("\nSubgraphs:")
+        for subgraph_id, data in self.subgraphs.items():
+            print(f"Subgraph {subgraph_id}: {data}")
+
+        print("\nTime Series:", len(self.time_series))
+        for tsid, ts in self.time_series.items():
+            print(f"Time Series {tsid}: {ts.metadata.owner_id}")
+            variables = [str(var) for var in ts.data.coords['variable'].values]
+            print(f"Variables: {', '.join(variables)}")
+            ts_df = ts.data.to_dataframe('value').reset_index()
+            grouped = ts_df.groupby('time')
+            for time, group in grouped:
+                values = [f" {row['value']}" for idx, row in group.iterrows()]
+                row_str = ", ".join(values)
+                print(f"{time}, {row_str}")
+        self.set_updated(False)  # Reset the flag after displaying
+
+#utility functions
+
+    #functions to calculate node degree over time
+    def _update_node_degree_time_series(self, source_id, target_id, operation, timestamp):
+        """
+        Update the node degree time series for source and target nodes.
+
+        :param source_id: ID of the source node
+        :param target_id: ID of the target node
+        :param operation: 'add' or 'remove'
+        :param timestamp: The time when the edge was added or removed
+        """
+        source_node = self.graph.nodes[source_id]['data']
+        target_node = self.graph.nodes[target_id]['data']
+
+        # Update out-degree for source node
+        self._update_degree_time_series_for_node(source_node, degree_type='out', operation=operation,
+                                                 timestamp=timestamp)
+
+        # Update in-degree for target node
+        self._update_degree_time_series_for_node(target_node, degree_type='in', operation=operation,
+                                                 timestamp=timestamp)
+
+    def _update_degree_time_series_for_node(self, node, degree_type, operation, timestamp):
+        """
+        Update the degree time series for a node.
+
+        :param node: The node object
+        :param degree_type: 'in' or 'out'
+        :param operation: 'add' or 'remove'
+        :param timestamp: The time when the edge was added or removed
+        """
+        property_name = f"{degree_type}_degree"
+        tsid = None
+        last_degree = 0
+        # Check if the node already has a degree time series
+        if property_name in node.temporal_properties:
+            tsid = node.temporal_properties[property_name].time_series_id
+            time_series = self.time_series[tsid]
+            last_degree = time_series.data.isel(time=-1).values.item()
+            # Update the degree based on the operation
+            # Update the degree based on the operation
+            new_degree = last_degree + 1 if operation == 'add' else max(0, last_degree - 1)
+            # Update the existing value at the timestamp or append a new entry
+            if time_series.has_timestamp(timestamp):
+                time_series.update_value_at_timestamp(timestamp, new_degree)
+            else:
+                # Append the new degree value with the timestamp
+                time_series.append_data(timestamp, new_degree)
+        else:
+            # Create a new time series for the degree
+            tsid = self.id_generator.generate_timeseries_id()
+            metadata = TimeSeriesMetadata(owner_id=node.oid, element_type='node')
+            # Set the initial degree based on the operation
+            new_degree = 1 if operation == 'add' else 0
+            # Wrap the data in a compatible format for xarray
+            data = np.array([[new_degree]])  # Ensure data has dimensions [time, variable]
+            time_index = pd.DatetimeIndex([timestamp])
+
+            # Create the TimeSeries instance with correctly shaped data
+            time_series = TimeSeries(tsid, time_index, [property_name], data, metadata)
+            self.time_series[tsid] = time_series
+            node.add_temporal_property(property_name, time_series, self)
+
+
+    #hybrid operators
+
+
+    #generate timeseries from graph
 
     def create_time_series_from_graph(self, query):
         """
@@ -673,62 +1018,574 @@ class HyGraph:
             timestamps, data_values = zip(*values)
             reshaped_data_values = np.array(data_values)[:, np.newaxis]
             tsid = self.id_generator.generate_timeseries_id()
-            metadata = TimeSeriesMetadata(element.oid, element_type, attribute)
+            metadata = TimeSeriesMetadata(element.oid, element_type)
             time_series = TimeSeries(tsid, timestamps, [attribute], reshaped_data_values, metadata)
 
             self.time_series[tsid] = time_series
             self.add_property(element_type, element.oid, attribute, tsid)
 
-    def graph_metrics_evolution(self):
-        igraph_g = IGraph.TupleList(self.graph.edges(), directed=False)
-        igraph_g.vs["name"] = list(self.graph.nodes())
 
-        communities = igraph_g.community_infomap()
+    #DFS with ts similarity
+    def find_nearest_node_with_similar_timeseries(
+        hygraph,
+        start_node_id,
+        similarity_func_name,
+        threshold,
+        property_name=None,
+        inverse_similarity=False,
+        variable_name=None
+    ):
+        """
+        Find the nearest node to the start_node_id that has similar time series behavior.
 
-        timestamp = datetime.now()
-        for idx, community in enumerate(communities):
-            for node in community:
-                node_id = igraph_g.vs[node]["name"]
-                self.graph.nodes[node_id]['data'].membership[timestamp] = idx
+        Args:
+            hygraph (HyGraph): The HyGraph instance containing the graph and time series data.
+            start_node_id (str): The starting node's ID.
+            similarity_func_name (str): Name of the similarity function to use.
+            threshold (float): The similarity threshold to determine if two time series are similar.
+            property_name (str, optional): The name of the temporal property containing the time series ID for PGNode.
+            inverse_similarity (bool, optional): If True, uses the inverse of the similarity measure.
+            variable_name (str, optional): The name of the variable in the time series to compare.
 
-        for source, target, key in self.graph.edges(keys=True):
-            source_community = self.graph.nodes[source]['data'].membership.get(timestamp)
-            target_community = self.graph.nodes[target]['data'].membership.get(timestamp)
-            if source_community == target_community:
-                self.graph.edges[source, target, key]['data'].membership[timestamp] = source_community
+        Returns:
+            node_id or None: The nearest node with similar time series behavior, or None if not found.
+        """
+
+        # Begin BFS traversal
+        visited = set()
+        queue = deque()
+        queue.append(start_node_id)
+        visited.add(start_node_id)
+
+        # Get the time series for the start node
+        start_node_data = hygraph.graph.nodes[start_node_id]
+        start_node_obj = start_node_data.get('data')  # Get the node object (PGNode or TSNode)
+
+        # Retrieve the start node's time series
+        start_ts = None
+
+        if property_name:
+            # Get time series from temporal_properties of the node
+            if hasattr(start_node_obj, 'temporal_properties'):
+                temporal_properties = start_node_obj.temporal_properties
+                if property_name in temporal_properties:
+                    temporal_prop = temporal_properties[property_name]
+                    time_series_id = temporal_prop.time_series_id
+                    start_ts = hygraph.time_series[time_series_id]
+                else:
+                    raise ValueError(f"Property '{property_name}' not found in node {start_node_id}'s temporal properties.")
             else:
-                self.graph.edges[source, target, key]['data'].membership[timestamp] = f"{source_community},{target_community}"
+                raise ValueError(f"Node {start_node_id} does not have temporal properties.")
+        else:
+            # Node must be TSNode or TSEdge, directly access the time series
+            if isinstance(start_node_obj, (TSNode, TSEdge)):
+                start_ts = start_node_obj.series  # This is a TimeSeries object
+            else:
+                raise ValueError(f"Property name not provided, and node {start_node_id} is not a TSNode or TSEdge.")
 
-    def batch_process(self):
-        """Batch processing function to process all nodes and edges."""
-        print("Starting batch processing...")
-        self.create_time_series_from_graph(self.query)  # Update time series for all nodes and edges
-        print("Batch processing completed.")
+        # Map similarity function names to TimeSeries methods
+        similarity_methods = {
+            'euclidean_distance': start_ts.euclidean_distance,
+            'correlation_coefficient': start_ts.correlation_coefficient,
+            'cosine_similarity': start_ts.cosine_similarity,
+            'manhattan_distance': start_ts.manhattan_distance,
+            'dynamic_time_warping': start_ts.dynamic_time_warping
+        }
 
-    def display(self):
-        print("Nodes:")
-        for node_id, data in self.graph.nodes(data=True):
-            print(f"Node {node_id}: {data}")
+        if similarity_func_name not in similarity_methods:
+            raise ValueError(f"Similarity function '{similarity_func_name}' not recognized.")
 
-        print("\nEdges:")
-        for source, target, key, data in self.graph.edges(keys=True, data=True):
-            print(f"Edge {key} from {source} to {target}: {data['data']}")
+        similarity_method = similarity_methods[similarity_func_name]
 
-        print("\nSubgraphs:")
-        for subgraph_id, data in self.subgraphs.items():
-            print(f"Subgraph {subgraph_id}: {data}")
+        # Now perform BFS traversal
+        while queue:
+            current_node_id = queue.popleft()
+            if current_node_id == start_node_id:
+                continue  # Already processed
 
-        print("\nTime Series:", len(self.time_series))
-        for tsid, ts in self.time_series.items():
-            print(f"Time Series {tsid}: {ts.metadata.owner_id}")
-            variables = [str(var) for var in ts.data.coords['variable'].values]
-            print(f"Variables: {', '.join(variables)}")
-            ts_df = ts.data.to_dataframe('value').reset_index()
-            grouped = ts_df.groupby('time')
-            for time, group in grouped:
-                values = [f" {row['value']}" for idx, row in group.iterrows()]
-                row_str = ", ".join(values)
-                print(f"{time}, {row_str}")
-        self.set_updated(False)  # Reset the flag after displaying
+            current_node_data = hygraph.graph.nodes[current_node_id]
+            current_node_obj = current_node_data.get('data')
 
-#utility functions
+            current_ts = None
+
+            if property_name:
+                # Get time series from temporal_properties
+                if hasattr(current_node_obj, 'temporal_properties'):
+                    temporal_properties = current_node_obj.temporal_properties
+                    if property_name in temporal_properties:
+                        temporal_prop = temporal_properties[property_name]
+                        time_series_id = temporal_prop.time_series_id
+                        current_ts = hygraph.time_series[time_series_id]
+                    else:
+                        continue  # Property not found, skip this node
+                else:
+                    continue  # Node does not have temporal properties
+            else:
+                # Node must be TSNode or TSEdge
+                if isinstance(current_node_obj, (TSNode, TSEdge)):
+                    current_ts = current_node_obj.series
+                else:
+                    continue  # Not a TSNode or TSEdge, skip
+
+            # Now compute similarity
+            if start_ts is not None and current_ts is not None:
+                try:
+                    similarity = similarity_method(current_ts)
+
+                    if inverse_similarity:
+                        similarity = -similarity  # Assuming higher negative values mean less similar
+
+                    if similarity >= threshold:
+                        return current_node_id  # Found a similar node
+                except ValueError as e:
+                    # Handle cases where time series lengths do not match or other errors
+                    print(f"Skipping node {current_node_id} due to error: {e}")
+                    continue
+
+            # Add neighbors to queue
+            for neighbor in hygraph.graph.neighbors(current_node_id):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        return None  # No similar node found
+
+
+from collections import defaultdict
+from itertools import product
+import networkx as nx
+
+class HyGraphQuery:
+    def __init__(self, hygraph):
+        self.hygraph = hygraph
+        self.node_matches = {}
+        self.edge_matches = {}
+        self.patterns = []
+        self.conditions = []
+        self.return_elements = []
+        self.groupings = []
+        self.aggregations = []
+        self.orderings = []
+        self.limit_count = None
+        self.distinct_flag = False
+        self.result_type = 'elements'
+        self.current_alias = None
+        self.subquery_results = None
+
+        # Indexing structures for optimization
+        self.node_index = defaultdict(set)  # {label: set(node_ids)}
+        self.edge_index = defaultdict(set)  # {label: set(edge_keys)}
+
+        # Build indices
+        self._build_indices()
+
+    def _build_indices(self):
+        # Build node index based on labels
+        for node_id, data in self.hygraph.graph.nodes(data=True):
+            label = data.get('label')
+            if label:
+                self.node_index[label].add(node_id)
+
+        # Build edge index based on labels
+        for u, v, key, data in self.hygraph.graph.edges(keys=True, data=True):
+            label = data.get('label')
+            if label:
+                self.edge_index[label].add((u, v, key))
+
+    def match_node(self, alias, label=None, node_type=None, node_id=None):
+        self.current_alias = alias
+        self.node_matches[alias] = {
+            'label': label,
+            'type': node_type,
+            'id': node_id,
+            'matches': None  # To store matched nodes
+        }
+        return self
+
+    def match_edge(self, alias, label=None, edge_type=None,edge_id=None):
+        self.current_alias = alias
+        self.edge_matches[alias] = {
+            'label': label,
+            'type': edge_type,
+             'id': edge_id,
+            'matches': None  # To store matched edges
+        }
+        return self
+
+    def connect(self, source_alias, edge_alias, target_alias):
+        # Validate aliases
+        if source_alias not in self.node_matches:
+            raise ValueError(f"Source alias '{source_alias}' not defined.")
+        if edge_alias not in self.edge_matches:
+            raise ValueError(f"Edge alias '{edge_alias}' not defined.")
+        if target_alias not in self.node_matches:
+            raise ValueError(f"Target alias '{target_alias}' not defined.")
+
+        self.patterns.append({
+            'source': source_alias,
+            'edge': edge_alias,
+            'target': target_alias
+        })
+        return self
+
+    def where(self, condition):
+        if self.current_alias is None:
+            raise ValueError("No current alias to apply the condition to.")
+        self.conditions.append({
+            'alias': self.current_alias,
+            'condition': condition
+        })
+        return self
+
+    def group_by(self, *aliases):
+        self.groupings.extend(aliases)
+        return self
+
+    def aggregate(self, alias, property_name, method='sum', direction='both', fill_value=0):
+        """
+        Perform aggregation over nodes or edges, handling both static and time series properties.
+
+        :param alias: Alias of the graph element to aggregate.
+        :param property_name: The property name to aggregate.
+        :param method: Aggregation method ('sum', 'mean', 'min', 'max').
+        :param direction: Edge direction to consider for edges ('in', 'out', 'both').
+        :param fill_value: Value to fill for missing timestamps in time series.
+        """
+        self.aggregations.append({
+            'alias': alias,
+            'property_name': property_name,
+            'method': method,
+            'direction': direction,
+            'fill_value': fill_value
+        })
+        return self
+
+    def order_by(self, key, ascending=True):
+        self.orderings.append({
+            'key': key,
+            'ascending': ascending
+        })
+        return self
+
+    def limit(self, count):
+        self.limit_count = count
+        return self
+
+    def distinct(self):
+        self.distinct_flag = True
+        return self
+
+    def return_(self, **aliases):
+        self.return_elements.extend(aliases.items())
+        return self
+
+    def result_as(self, result_type):
+        self.result_type = result_type
+        return self
+
+    def subquery(self, subquery_func):
+        """
+        Use the result of a subquery in the current query.
+        The subquery_func should return a list of node or edge instances.
+        """
+        subquery_results = subquery_func(HyGraphQuery(self.hygraph).execute())
+        self.subquery_results = subquery_results
+        return self
+
+
+
+    def execute(self):
+        # Match nodes and edges
+        self._match_nodes()
+        self._match_edges()
+
+        # Apply conditions
+        self._apply_conditions()
+
+        # Match patterns
+        if self.patterns:
+            results = self._match_patterns()
+        else:
+            results = self._combine_matches()
+
+        # Apply grouping and aggregations
+        results = self._apply_aggregations(results)
+
+        # Apply distinct
+        results = self._apply_distinct(results)
+
+        # Apply ordering
+        results = self._apply_ordering(results)
+
+        # Apply limit
+        results = self._apply_limit(results)
+
+        # Format results
+        formatted_results = self._format_results(results)
+
+        return formatted_results
+
+    def _match_nodes(self):
+        for alias, criteria in self.node_matches.items():
+            label = criteria['label']
+            node_type = criteria['type']
+            node_id = criteria['id']
+            matches = []
+            # If node_id is specified, match this node directly and skip further processing
+            if node_id:
+                node_data = self.hygraph.graph.nodes[node_id]
+                node_obj = node_data.get('data')  # PGNode, TSNode, etc.
+                matches.append(node_obj)
+                criteria['matches'] = matches
+                continue
+
+            # Get candidate nodes from the index if label is provided
+            if label:
+                candidate_node_ids = self.node_index.get(label, set())
+            else:
+                candidate_node_ids = set(self.hygraph.graph.nodes())
+
+            # Filter by node_type and collect node objects
+            matches = []
+            for node_id in candidate_node_ids:
+                data = self.hygraph.graph.nodes[node_id]
+                if node_type and data.get('type') != node_type:
+                    continue
+                node_obj = data.get('data')  # This should be the PGNode, TSNode, etc.
+                if node_obj:
+                    matches.append(node_obj)
+            criteria['matches'] = matches
+
+    def _match_edges(self):
+        for alias, criteria in self.edge_matches.items():
+            label = criteria['label']
+            edge_type = criteria['type']
+            edge_id = criteria['id']
+            # Get candidate edges from index
+            matches = []
+            if edge_id:
+                for u, v, key, data in self.hygraph.graph.edges(keys=True, data=True):
+                    edge_obj = data.get('data')  # Should be the PGEdge, TSEdge, etc.
+                    if data.get('oid') == edge_id and edge_obj:
+                        matches.append(edge_obj)
+                criteria['matches'] = matches
+                continue  # Skip further processing if edge_id is provided
+
+            if label:
+                candidate_edges = self.edge_index.get(label, set())
+            else:
+                candidate_edges = set(self.hygraph.graph.edges(keys=True))
+
+            # Filter by edge_type and collect edge objects
+
+            for u, v, key in candidate_edges:
+                data = self.hygraph.graph.edges[u, v, key]
+                if edge_type and data.get('type') != edge_type:
+                    continue
+                edge_obj = data.get('data')  # This should be the PGEdge, TSEdge, etc.
+                if edge_obj:
+                    matches.append(edge_obj)
+            criteria['matches'] = matches
+
+    def _apply_conditions(self):
+        # Apply conditions to matched nodes and edges
+        for condition in self.conditions:
+            alias = condition['alias']
+            cond_func = condition['condition']
+
+            if alias in self.node_matches:
+                matches = self.node_matches[alias]['matches']
+                filtered_matches = [node for node in matches if cond_func(node)]
+                self.node_matches[alias]['matches'] = filtered_matches
+            elif alias in self.edge_matches:
+                matches = self.edge_matches[alias]['matches']
+                filtered_matches = [edge for edge in matches if cond_func(edge)]
+                self.edge_matches[alias]['matches'] = filtered_matches
+            else:
+                raise ValueError(f"Alias '{alias}' not found in nodes or edges.")
+
+    def _match_patterns(self):
+        combined_results = []
+        for pattern in self.patterns:
+            source_alias = pattern['source']
+            edge_alias = pattern['edge']
+            target_alias = pattern['target']
+            direction = pattern.get('direction', 'both')  # Default to 'both' if not specified
+
+            source_nodes = self.node_matches[source_alias]['matches']
+            target_nodes = self.node_matches[target_alias]['matches']
+            edge_matches = self.edge_matches[edge_alias]['matches']
+
+            # Build dictionaries for quick lookup
+            source_nodes_dict = {node.getId(): node for node in source_nodes}
+            target_nodes_dict = {node.getId(): node for node in target_nodes}
+
+            # Now find matching combinations
+            for edge in edge_matches:
+                edge_source_id = edge.source
+                edge_target_id = edge.target
+
+                # Forward direction: source -> target
+                if direction in ('both', 'out'):  # Match outgoing edges from source to target
+                    source_node = source_nodes_dict.get(edge_source_id)
+                    target_node = target_nodes_dict.get(edge_target_id)
+                    if source_node and target_node:
+                        result = {
+                            source_alias: source_node,
+                            edge_alias: edge,
+                            target_alias: target_node
+                        }
+                        combined_results.append(result)
+
+                # Reverse direction: target -> source
+                if direction in ('both', 'in'):  # Match incoming edges from target to source
+                    source_node = source_nodes_dict.get(edge_target_id)
+                    target_node = target_nodes_dict.get(edge_source_id)
+                    if source_node and target_node:
+                        result = {
+                            source_alias: source_node,
+                            edge_alias: edge,
+                            target_alias: target_node
+                        }
+                        combined_results.append(result)
+
+        return combined_results
+    def _combine_matches(self):
+        # Combine matches from nodes and edges without patterns
+        combined_results = []
+
+        node_aliases = list(self.node_matches.keys())
+        edge_aliases = list(self.edge_matches.keys())
+
+        node_match_lists = [self.node_matches[alias]['matches'] for alias in node_aliases]
+        edge_match_lists = [self.edge_matches[alias]['matches'] for alias in edge_aliases]
+
+        for node_combination in product(*node_match_lists):
+            result = dict(zip(node_aliases, node_combination))
+            if edge_aliases:
+                for edge_combination in product(*edge_match_lists):
+                    edge_result = result.copy()
+                    edge_result.update(dict(zip(edge_aliases, edge_combination)))
+                    combined_results.append(edge_result)
+            else:
+                combined_results.append(result)
+
+        return combined_results
+
+    def _edge_direction_matches(self, edge, node, direction):
+        """
+        Check if an edge matches the specified direction relative to a given node.
+
+        :param edge: The edge to check.
+        :param node: The node relative to which direction is evaluated.
+        :param direction: Direction to check ('in', 'out', or 'both').
+                """
+        if direction == 'both':
+            return edge.source == node.getId() or edge.target == node.getId()
+        elif direction == 'in':
+            return edge.target == node.getId()
+        elif direction == 'out':
+            return edge.source == node.getId()
+        return False
+
+    def _apply_aggregations(self, results):
+        if not self.aggregations and not self.groupings:
+            return results
+
+        # Group results based on groupings (e.g., 'station' nodes)
+        grouped_results = defaultdict(list)
+        for result in results:
+            group_key = tuple(result[alias].getId() for alias in self.groupings)
+            grouped_results[group_key].append(result)
+
+        # Define aggregation methods for both static values and time series
+        agg_funcs = {
+            'sum': np.sum,
+            'mean': np.mean,
+            'min': np.min,
+            'max': np.max
+        }
+
+        # Process each group
+        aggregated_results = []
+        for group_key, group_items in grouped_results.items():
+            agg_result = {}
+            for alias in self.groupings:
+                agg_result[alias] = group_items[0][alias]
+
+            # Apply aggregations for each specified property
+            for aggregation in self.aggregations:
+                agg_alias = aggregation['alias']
+                property_name = aggregation['property_name']
+                method = aggregation['method']
+                direction = aggregation.get('direction', 'both')
+                fill_value = aggregation.get('fill_value', 0)
+
+                # Collect edges based on direction
+                central_node = group_items[0][self.groupings[0]]
+                connected_edges = [
+                    item[agg_alias]
+                    for item in group_items
+                    if self._edge_direction_matches(item[agg_alias], central_node, direction)
+                ]
+
+                # Separate handling for time series and static properties
+                if connected_edges :
+                    try :
+                        if isinstance(connected_edges[0].get_temporal_property(property_name), TimeSeries) :
+                            # Time series aggregation
+                            time_series_list = [
+                                edge.get_temporal_property(property_name)
+                                for edge in connected_edges if edge.get_temporal_property(property_name)
+                            ]
+                            if time_series_list:
+                                agg_result[property_name] = TimeSeries.aggregate_multiple(
+                                    time_series_list, method
+                                )
+                    except ValueError:
+
+                        # Static properties aggregation
+                        values = [
+                            edge.get_static_property(property_name)
+                            for edge in connected_edges if edge.get_static_property(property_name) is not None
+                        ]
+                        agg_result[property_name] = agg_funcs[method](values)
+
+            aggregated_results.append(agg_result)
+
+        return aggregated_results
+
+    def _apply_ordering(self, results):
+        for ordering in reversed(self.orderings):
+            key = ordering['key']
+            ascending = ordering['ascending']
+            results.sort(key=lambda x: x.get(key, None), reverse=not ascending)
+        return results
+
+    def _apply_limit(self, results):
+        if self.limit_count is not None:
+            results = results[:self.limit_count]
+        return results
+
+    def _apply_distinct(self, results):
+        if self.distinct_flag:
+            unique_results = []
+            seen = set()
+            for result in results:
+                result_tuple = tuple((alias, element.oid) for alias, element in result.items())
+                if result_tuple not in seen:
+                    seen.add(result_tuple)
+                    unique_results.append(result)
+            return unique_results
+        return results
+
+    def _format_results(self, results):
+        formatted_results = []
+        for result in results:
+            formatted_result = {}
+            for alias, func in self.return_elements:
+                value = func(result)
+                formatted_result[alias] = value
+                # Additional debug: Print the computed value for each alias
+            formatted_results.append(formatted_result)
+        return formatted_results

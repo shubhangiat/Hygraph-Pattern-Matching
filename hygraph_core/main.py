@@ -1,18 +1,20 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from watchdog.observers import Observer
 
 from HyGraphFileLoaderBatch import HyGraphBatchProcessor
-from hygraph import HyGraph, Edge, PGNode
+from hygraph import HyGraph, Edge, PGNode, HyGraphQuery
 from fileProcessing import NodeFileHandler, EdgeFileHandler, HyGraphFileLoader
 import os
+
+from hygraph_core.timeseries_operators import TimeSeries
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 def connection_count_aggregate_function(graph, element_type, oid, attribute, date):
     if element_type == 'node':
-        print("number of connections ",len(list(graph.graph.neighbors(oid))) )
+        print("number of connections ", len(list(graph.graph.neighbors(oid))))
         return len(list(graph.graph.neighbors(oid)))
     return 0
 
@@ -22,7 +24,7 @@ def count_edges_in_subgraph(subgraph, date):
 
 
 if __name__ == "__main__":
-    nodes_folder = os.path.join(base_dir, 'inputFiles', 'nodes')
+    '''nodes_folder = os.path.join(base_dir, 'inputFiles', 'nodes')
     edges_folder = os.path.join(base_dir, 'inputFiles', 'edges')
     subgraph_folder = os.path.join(base_dir, 'inputFiles', 'subgraphs')
     edges_membership_path = base_dir+"/inputFiles/edge_membership.csv"
@@ -86,5 +88,85 @@ if __name__ == "__main__":
     data = [[25], [27], [28]]
 
     # Add a time series in the hygraph
-    graph_element.add_temporal_property('temperature', timestamps, variables, data)
+    graph_element.add_temporal_property('temperature', timestamps, variables, data) '''
 
+    hygraph = HyGraph()  # Initialize an empty HyGraph instance
+
+    # Add mock PGNode stations with static properties including 'capacity'
+    node1 = hygraph.add_pgnode(oid=1, label='Station', start_time=datetime.now(),
+                               properties={'capacity': 100, 'name': 'Station A'})
+    hygraph.add_pgnode(oid=2, label='Station', start_time=datetime.now(),
+                       properties={'capacity': 40, 'name': 'Station B'})
+    hygraph.add_pgnode(oid=3, label='Station', start_time=datetime.now(),
+                       properties={'capacity': 60, 'name': 'Station C'})
+
+    try:
+        data = hygraph.graph.nodes[1]
+        print("Data keys for node:", data.keys())
+        print("Specific data content:", {k: data[k] for k in data.keys()})
+    except Exception as e:
+        print(f"Error accessing data for node {1}: {e}")
+
+
+
+    edge1=hygraph.add_pgedge(oid=4,source=1,target=2,label='Trip',start_time=datetime.now() + timedelta(hours=4))
+    # Create a TimeSeries object
+    timestamps = ['2023-01-01', '2023-01-02', '2023-01-03']
+    data = [[10], [20], [15]]  # Values associated with the timestamps
+    variables = ['BikeAvailability']
+
+    time_series = hygraph.add_time_series(timestamps, variables, data)
+
+    time_series.display_time_series()
+    node1.add_temporal_property("bikeavailable", time_series, hygraph)
+    node1.add_static_property("lat", 20, hygraph)
+    edge1.add_static_property("bike_type","electric",hygraph)
+    print('Node with label station: ', hygraph.get_nodes_by_label('Station'))
+
+
+    def condition(ts):
+        return ts.sum() > 40
+
+
+    print("here is the first condition ", hygraph.get_nodes_by_temporal_property("bikeavailable", condition))
+
+
+    def condition_static(static_prop):
+        return static_prop.get_value() == 60
+
+
+    print("here is the second condition ", hygraph.get_nodes_by_static_property("capacity", condition_static))
+
+    query = HyGraphQuery(hygraph)
+
+
+    def condition_func(node):
+        print("Node structure:", node.get('properties', {}).get('capacity').get_value()> 50)  # This will show you what `node` contains
+        return node.get('properties', {}).get('capacity').get_value()> 50
+
+
+    results = (
+        query
+        .match_node(alias='station', node_id=1)  # Match edge by key only
+        .return_(
+            name=lambda n: n['station'].get_static_property('name'),
+        )
+        .execute()
+    )
+    print("the edge",edge1)
+    for result in results:
+        print(result)
+
+    print('actua one : ', len(results))
+    for node in results:
+        print(node)
+    # Retrieve the historical in-degree of a node
+    ts_in_degree=node_degree_history = hygraph.get_node_degree_over_time(node_id=1, degree_type='in', return_type='history')
+    node_degree_history.display_time_series()
+
+    # Retrieve the current out-degree of a node
+    current_out_degree = hygraph.get_node_degree_over_time(node_id=1, degree_type='out', return_type='current')
+    print(f"Current Out-Degree: {current_out_degree}")
+    ts_out_degree=hygraph.get_node_degree_over_time(node_id=1,degree_type='out',return_type='history')
+
+    
