@@ -1,3 +1,5 @@
+from itertools import product
+
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -28,6 +30,20 @@ class HyGraph:
         self.query =None
 
     #create
+
+    def initialize_degree_timeseries(self, oid, start_time):
+        for degree_type in ['in_degree', 'out_degree']:
+            tsid = self.id_generator.generate_timeseries_id()
+            metadata = TimeSeriesMetadata(owner_id=oid, element_type='node')
+            degree_ts = TimeSeries(tsid=tsid, timestamps=[start_time], variables=[degree_type], data=[[0]],
+                                   metadata=metadata)
+
+            # Add this time series to the time_series dictionary and store it in metadata
+            self.time_series[tsid] = degree_ts
+            self.graph.nodes[oid]['metadata'][degree_type] = degree_ts  # Attach directly to metadata
+            #print(f"Initialized {degree_type} as TimeSeries for node {oid} with initial value 0 at {start_time}")
+
+
     def add_pgedge(self, oid, source, target, label, start_time,end_time=None, properties=None, membership=None):
         """
         Adds a PGEdge to the Hygraph, supporting both static and temporal properties, and membership.
@@ -98,7 +114,7 @@ class HyGraph:
         """
         # Step 1: Create the PGNode instance
         if end_time is None : end_time=FAR_FUTURE_DATE
-        pgnode = PGNode(oid, label, start_time, end_time, oid,self)
+        pgnode = PGNode(oid, label, start_time, end_time)
 
         # Step 2: Add static and temporal properties
         if properties:
@@ -113,20 +129,13 @@ class HyGraph:
             pgnode.membership = membership.tsid  # Store the timeseries ID for membership
             self.time_series[membership.tsid] = membership  # Add membership timeseries to hygraph storage
             # Initialize in_degree and out_degree time series to 0 at start_time
-        for degree_type in ['in_degree', 'out_degree']:
-            tsid = self.id_generator.generate_timeseries_id()
-            metadata = TimeSeriesMetadata(owner_id=oid, element_type='node')
-            initial_degree_ts = TimeSeries(tsid=tsid, timestamps=[start_time], variables=[degree_type], data=[[0]],
-                                           metadata=metadata)
-            self.time_series[tsid] = initial_degree_ts
-            pgnode.add_temporal_property(degree_type, initial_degree_ts, self)
-            # Add a print statement to confirm creation
-            print(f"Initialized {degree_type} for node {oid} with timestamp {start_time} and initial value 0")
+        metadata = {}
         # Step 4: Add the node to the networkx graph
         self.graph.add_node(oid,
                             label=label,
                             start_time=start_time,
                             end_time=end_time,
+                            metadata=metadata,
                             properties={**pgnode.static_properties, **pgnode.temporal_properties},
                             # Merging static and temporal properties
                             membership=pgnode.membership,
@@ -134,6 +143,8 @@ class HyGraph:
                             type="PGNode")
         # Mark the graph as updated
         self.set_updated()
+        # Call function to initialize in_degree and out_degree as TimeSeries within metadata
+        self.initialize_degree_timeseries(oid, start_time)
         print(f"PGNode {oid} with label '{label}' successfully created and end_time '{pgnode.end_time}'.")
 
 
@@ -148,28 +159,20 @@ class HyGraph:
         :param time_series: Timeseries object representing the time series for this node.
         """
         # Step 1: Create the TSNode instance
-        tsnode = TSNode(oid, label, time_series,self)
-
+        tsnode = TSNode(oid, label, time_series)
+        metadata = {}
         # Step 2: Add the timeseries to Hygraph storage
         self.time_series[time_series.tsid] = time_series
-        start_time = time_series.first_timestam()
-        # Initialize in_degree and out_degree time series to 0 at start_time
-        for degree_type in ['in_degree', 'out_degree']:
-            tsid = self.id_generator.generate_timeseries_id()
-            metadata = TimeSeriesMetadata(owner_id=oid, element_type='node')
-            initial_degree_ts = TimeSeries(tsid=tsid, timestamps=[start_time], variables=[degree_type], data=[[0]],
-                                           metadata=metadata)
-            self.time_series[tsid] = initial_degree_ts
-            tsnode.add_temporal_property(degree_type, initial_degree_ts, self)
-            # Add a print statement to confirm creation
-            print(f"Initialized {degree_type} for node {oid} with timestamp {start_time} and initial value 0")
-
+        start_time = time_series.first_timestamp()
         # Step 3: Add the node to the networkx graph
         self.graph.add_node(oid,
                             label=label,
                             series=time_series.tsid,  # Store only the timeseries ID in the node
+                            metadata=metadata,
                             data=tsnode,
                             type="TSNode")
+        # Call function to initialize in_degree and out_degree as TimeSeries within metadata
+        self.initialize_degree_timeseries(oid, start_time)
         print(f"TSNode {oid} with label '{label}' successfully created.")
         # Mark the graph as updated
         self.set_updated()
@@ -194,7 +197,7 @@ class HyGraph:
             raise ValueError(f"Target node {target} does not exist.")
 
         # Step 2: Create the TSEdge instance
-        tsedge = TSEdge (oid, label, time_series,self)
+        tsedge = TSEdge (oid, label, time_series)
 
         # Step 3: Add the timeseries to Hygraph storage
         self.time_series[time_series.tsid] = time_series
@@ -246,10 +249,12 @@ class HyGraph:
         subgraph_obj = Subgraph(
             subgraph_id,
             label or f"Subgraph {subgraph_id}",
+            start_time or datetime.now(),
+            end_time or FAR_FUTURE_DATE,
             static_properties or {},
             temporal_properties or {},
-            start_time or datetime.now(),
-            end_time  ,self
+
+
         )
 
         # Store the subgraph view and Subgraph object in the subgraphs dictionary
@@ -260,7 +265,7 @@ class HyGraph:
         }
 
         print(f"Subgraph '{subgraph_id}' created and stored.")
-        return subgraph_view
+        return self.subgraphs[subgraph_id]
 
     def set_updated(self, value=True):
         self.updated = value
@@ -331,14 +336,12 @@ class HyGraph:
         if element.membership is None:
             tsid = self.id_generator.generate_timeseries_id()
             membership_string = ' '.join(subgraph_ids)
-            print('membership', membership_string)
-            metadata=TimeSeriesMetadata(element_id,'membership',element_type)
+            metadata=TimeSeriesMetadata(element_id,element_type,'membership')
             time_series = TimeSeries(tsid, [timestamp], ['membership'], membership_string,metadata)
             self.time_series[tsid] = time_series
             element.membership = tsid
             print(f"Timeseries created for: {element_type} {element_id}: {time_series}")
         else:
-
             tsid = element.membership
             time_series = self.time_series[tsid]
             # Initialize the membership string for each update
@@ -351,7 +354,6 @@ class HyGraph:
             # Combine, deduplicate, and sort memberships
             updated_membership = sorted(set(last_entry + subgraph_ids))
             membership_string = ' '.join(updated_membership)
-            print('membership', membership_string)
             time_series.append_data(timestamp, membership_string)
             print(f"Updated membership for {element_type} {element_id} at {timestamp}: add {subgraph_ids}")
 
@@ -482,32 +484,93 @@ class HyGraph:
         ts = self.time_series[tsid]
         if display:
             ts.display_time_series(limit=limit, order=order)
-        return ts.data
+        return ts
 
-    def get_subgraph(self, subgraph_id):
+    def get_subgraph_at(self, subgraph_id, timestamp):
+        """
+        Extracts the subgraph at a specific timestamp.
+
+        :param subgraph_id: Identifier of the subgraph.
+        :param timestamp: The timestamp at which to extract the subgraph.
+        :return: A NetworkX graph representing the subgraph at the given time.
+        """
         if subgraph_id not in self.subgraphs:
-            raise ValueError(f"Subgraph with ID {subgraph_id} does not exist.")
-        return self.subgraphs[subgraph_id]
+            raise ValueError(f"Subgraph with ID '{subgraph_id}' does not exist.")
 
-    def display_subgraphs(self):
+        subgraph_obj = self.subgraphs[subgraph_id]
+
+        # Extract nodes that are members of the subgraph at the given timestamp
+        nodes_in_subgraph = []
+        for node_id, data in self.graph.nodes(data=True):
+            node = data.get('data')
+            if node.membership:
+                tsid = node.membership
+                time_series = self.time_series[tsid]
+                memberships = time_series.get_value_at_timestamp(timestamp)
+                if memberships and subgraph_id in memberships:
+                    nodes_in_subgraph.append(node_id)
+
+        # Extract edges that are members of the subgraph at the given timestamp
+        edges_in_subgraph = []
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            edge = data.get('data')
+            if edge.membership:
+                tsid = edge.membership
+                time_series = self.time_series[tsid]
+                memberships = time_series.get_value_at_timestamp(timestamp)
+                if memberships and subgraph_id in memberships:
+                    edges_in_subgraph.append((u, v, key))
+
+        # Create the subgraph
+        subgraph = self.graph.edge_subgraph(edges_in_subgraph).copy()
+        subgraph = subgraph.subgraph(nodes_in_subgraph).copy()
+
+        return subgraph
+
+    def display_subgraph(self, subgraph_id, timestamp):
         """
-        Display information about all subgraphs stored in the HyGraph.
+        Display the subgraph with its associated nodes, edges, labels, start and end times, static and temporal properties.
+
+        :param subgraph_id: Identifier of the subgraph to display.
+        :param timestamp: The timestamp at which to display the subgraph.
         """
-        print("\nSubgraphs:")
-        for subgraph_id, data in self.subgraphs.items():
-            subgraph_view = data['view']
-            subgraph_obj = data.get('data')
-            if subgraph_obj.end_time is None or subgraph_obj.end_time > datetime.now():
-                # Subgraph is active
-                num_nodes = subgraph_view.number_of_nodes()
-                num_edges = subgraph_view.number_of_edges()
-                label = subgraph_obj.label
-                print(
-                    f"Subgraph '{subgraph_id}': Label: {label}, {num_nodes} nodes, {num_edges} edges, created at {data['created_at']}")
-                # Display properties...
-            else:
-                # Subgraph is logically deleted
-                print(f"Subgraph '{subgraph_id}' is logically deleted as of {subgraph_obj.end_time}.")
+        subgraph_obj = self.subgraphs.get(subgraph_id)['data']
+        if not subgraph_obj:
+            print(f"Subgraph '{subgraph_id}' does not exist.")
+            return
+
+        # Display subgraph properties
+        print(f"Subgraph '{subgraph_id}': Label: {subgraph_obj.label}")
+        print(f"Start Time: {subgraph_obj.start_time}, End Time: {subgraph_obj.end_time}")
+        # Display static properties
+        if subgraph_obj.static_properties:
+            print("Static Properties:")
+            for prop_name, prop in subgraph_obj.static_properties.items():
+                print(f"  {prop_name}: {prop.value}")
+        # Display temporal properties
+        if subgraph_obj.temporal_properties:
+            print("Temporal Properties:")
+            for prop_name, prop in subgraph_obj.temporal_properties.items():
+                print(f"  {prop_name}: {prop}")
+        print("---")
+
+        # Get subgraph at the given timestamp
+        subgraph_at_time = self.get_subgraph_at(subgraph_id, timestamp)
+
+        # Display nodes
+        print("Nodes in Subgraph:")
+        for node_id, data in subgraph_at_time.nodes(data=True):
+            node = data.get('data')
+            print(f"Node ID: {node_id}, Label: {node.label}")
+
+        # Display edges
+        print("\nEdges in Subgraph:")
+        for u, v, key, data in subgraph_at_time.edges(keys=True, data=True):
+            edge = data.get('data')
+            print(f"Edge ID: {key}, From: {u}, To: {v}, Label: {edge.label}")
+            # Display edge's static properties
+
+        print("---")
 
     def get_all_edges(self):
         """
@@ -596,6 +659,24 @@ class HyGraph:
                 nodes.append((node_id, node_data))
         return nodes
 
+    def get_node_by_type(self, node_type):
+        """
+        Retrieve all nodes of a specific type.
+
+        :param node_type: Type of the node to retrieve (e.g., 'TSNode' or 'PGNode').
+        :return: List of nodes matching the specified type.
+        """
+        return [node for _, node in self.graph.nodes(data=True) if node['data'].get_type() == node_type]
+
+    def get_edge_by_type(self, edge_type):
+        """
+        Retrieve all edges of a specific type.
+
+        :param edge_type: Type of the edge to retrieve (e.g., 'PGEdge' or 'TSEdge').
+        :return: List of edges matching the specified type.
+        """
+        return [edge_data['data'] for _, _, edge_data in self.graph.edges(data=True) if
+                edge_data['data'].get_type() == edge_type]
     def get_nodes_by_static_property(self, property_name, condition):
         """
         Retrieve all nodes where the static property matches the given value.
@@ -613,7 +694,6 @@ class HyGraph:
 
             if not static_prop or not isinstance(static_prop, StaticProperty):
                 continue
-            print('here is static prop',static_prop)
             if condition(static_prop):
                 node_data = {key: value for key, value in data.items() if key != 'data'}
                 nodes.append((node_id, node_data))
@@ -786,16 +866,15 @@ class HyGraph:
         :param return_type: 'history' or 'current'
         :return: Degree time series or current degree value
         """
-        node = self.graph.nodes[node_id]['data']
-
+        node = self.graph.nodes[node_id]['metadata']
         degrees = []
 
         if degree_type in ['in', 'both']:
-            in_degree_ts = node.get_temporal_property('in_degree')
+            in_degree_ts = node['in_degree']  # Access in_degree from metadata
             degrees.append(in_degree_ts)
 
         if degree_type in ['out', 'both']:
-            out_degree_ts = node.get_temporal_property('out_degree')
+            out_degree_ts = node['out_degree']  # Access out_degree from metadata
             degrees.append(out_degree_ts)
 
         if degrees:
@@ -855,8 +934,8 @@ class HyGraph:
         :param operation: 'add' or 'remove'
         :param timestamp: The time when the edge was added or removed
         """
-        source_node = self.graph.nodes[source_id]['data']
-        target_node = self.graph.nodes[target_id]['data']
+        source_node = self.graph.nodes[source_id]['metadata']
+        target_node = self.graph.nodes[target_id]['metadata']
 
         # Update out-degree for source node
         self._update_degree_time_series_for_node(source_node, degree_type='out', operation=operation,
@@ -879,11 +958,10 @@ class HyGraph:
         tsid = None
         last_degree = 0
         # Check if the node already has a degree time series
-        if property_name in node.temporal_properties:
-            tsid = node.temporal_properties[property_name].time_series_id
+        if property_name in node:
+            tsid = node[property_name].tsid
             time_series = self.time_series[tsid]
             last_degree = time_series.data.isel(time=-1).values.item()
-            # Update the degree based on the operation
             # Update the degree based on the operation
             new_degree = last_degree + 1 if operation == 'add' else max(0, last_degree - 1)
             # Update the existing value at the timestamp or append a new entry
@@ -905,8 +983,7 @@ class HyGraph:
             # Create the TimeSeries instance with correctly shaped data
             time_series = TimeSeries(tsid, time_index, [property_name], data, metadata)
             self.time_series[tsid] = time_series
-            node.add_temporal_property(property_name, time_series, self)
-
+            node[property_name] = time_series  # Store directly in metadata
 
     #hybrid operators
 
@@ -1151,9 +1228,6 @@ class HyGraph:
         return None  # No similar node found
 
 
-from collections import defaultdict
-from itertools import product
-import networkx as nx
 
 class HyGraphQuery:
     def __init__(self, hygraph):

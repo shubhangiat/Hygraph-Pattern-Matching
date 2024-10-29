@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 from hygraph_core.timeseries_operators import TimeSeries, TimeSeriesMetadata
 
@@ -198,7 +199,7 @@ class Node(GraphElement):
         super().__init__(oid, label, element_type, static_propeprties,
                          temporal_properties)  # Initialize the Subject
         self.node_id = node_id  # External ID from CSV file
-        self.membership = membership if membership is not None else {}
+        self.membership = membership
 
     def __repr__(self):
         base_str = super().__repr__()
@@ -239,8 +240,8 @@ class PGNode(Node):
 
     def __repr__(self):
         base_repr = super().__repr__()
-        start_time_str = self.start_time.isoformat() if self.start_time else 'None'
-        end_time_str = self.end_time.isoformat() if self.end_time else 'None'
+        start_time_str = BaseTimeFormatter.format_time(self.start_time)
+        end_time_str = BaseTimeFormatter.format_time(self.end_time)
 
         return f"{base_repr}, start_time={start_time_str}, end_time={end_time_str}"
 
@@ -252,9 +253,6 @@ class TSNode(Node):
     def __init__(self, oid, label, time_series, element_type='TSNode', node_id=None):
         super().__init__(oid, label, element_type, node_id)
         self.series = time_series  # TimeSeries object
-        # TSNode does not have properties, so we exclude static and temporal properties
-        del self.static_properties
-        del self.temporal_properties
 
     def __repr__(self):
         base_str = super().__repr__()
@@ -276,7 +274,7 @@ class Edge(GraphElement):
     def __init__(self, oid, source, target, label, element_type, membership=None, static_properties=None,
                  temporal_properties=None, edge_id=None):
         super().__init__(oid, label, element_type, static_properties, temporal_properties)
-        self.membership = membership if membership is not None else {}
+        self.membership = membership
         self.source = source
         self.target = target
         self.edge_id = edge_id  # External ID from CSV file
@@ -294,8 +292,8 @@ class PGEdge(Edge):
 
     def __repr__(self):
         base_str = super().__repr__()
-        start_time_str = self.start_time.isoformat() if self.start_time else 'None'
-        end_time_str = self.end_time.isoformat() if self.end_time else 'None'
+        start_time_str = BaseTimeFormatter.format_time(self.start_time)
+        end_time_str = BaseTimeFormatter.format_time(self.end_time)
 
         return f"{base_str}, start_time={start_time_str}, end_time={end_time_str}}}"
 
@@ -304,9 +302,7 @@ class TSEdge(Edge):
     def __init__(self, oid, source, target, label, time_series, element_type='TSEdge', edge_id=None):
         super().__init__(oid, source, target, label, element_type, edge_id)
         self.series = time_series  # TimeSeries object
-        # TSEdge does not have properties, so we exclude static and temporal properties
-        del self.static_properties
-        del self.temporal_properties
+
 
     def __repr__(self):
         base_str = super().__repr__()
@@ -335,7 +331,9 @@ class Subgraph(GraphElement):
     def __repr__(self):
         # Call the base class's __repr__ to include static and temporal properties
         base_repr = super().__repr__()
-        return f"{base_repr}, start_time={self.start_time}, end_time={self.end_time}"
+        start_time_str = BaseTimeFormatter.format_time(self.start_time)
+        end_time_str = BaseTimeFormatter.format_time(self.end_time)
+        return f"{base_repr}, start_time={start_time_str}, end_time={end_time_str}"
 
     def get_type(self):
         # Identify this as a subgraph
@@ -348,6 +346,7 @@ class Subgraph(GraphElement):
         if self.filter_func:
             return self.filter_func(element)
         return False  # Default behavior if no filter function is provided
+
 
 
 class StaticProperty:
@@ -451,3 +450,12 @@ class TemporalProperty:
 
     def __str__(self):
         return self.__repr__()
+
+
+#UTILITY FUNCTIONS
+class BaseTimeFormatter:
+    @staticmethod
+    def format_time(time):
+        if isinstance(time, np.datetime64):
+            time = pd.to_datetime(time).to_pydatetime()
+        return time.isoformat() if time else 'None'

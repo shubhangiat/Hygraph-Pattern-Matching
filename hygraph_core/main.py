@@ -93,11 +93,11 @@ if __name__ == "__main__":
     hygraph = HyGraph()  # Initialize an empty HyGraph instance
 
     # Add mock PGNode stations with static properties including 'capacity'
-    node1 = hygraph.add_pgnode(oid=1, label='Station', start_time=datetime.now(),
+    node1 = hygraph.add_pgnode(oid=1, label='Station', start_time=datetime.now()- timedelta(hours=7),
                                properties={'capacity': 100, 'name': 'Station A'})
-    hygraph.add_pgnode(oid=2, label='Station', start_time=datetime.now(),
+    node2=hygraph.add_pgnode(oid=2, label='Station', start_time=datetime.now()- timedelta(hours=8),
                        properties={'capacity': 40, 'name': 'Station B'})
-    hygraph.add_pgnode(oid=3, label='Station', start_time=datetime.now(),
+    node3=hygraph.add_pgnode(oid=3, label='Station', start_time=datetime.now()- timedelta(hours=7),
                        properties={'capacity': 60, 'name': 'Station C'})
 
     try:
@@ -109,7 +109,8 @@ if __name__ == "__main__":
 
 
 
-    edge1=hygraph.add_pgedge(oid=4,source=1,target=2,label='Trip',start_time=datetime.now() + timedelta(hours=4))
+    edge1=hygraph.add_pgedge(oid=4,source=1,target=2,label='Trip', start_time=datetime.now() - timedelta(hours=4))
+    edge2 = hygraph.add_pgedge(oid=5, source=2, target=3, label='Trip', start_time=datetime.now() - timedelta(hours=3))
     # Create a TimeSeries object
     timestamps = ['2023-01-01', '2023-01-02', '2023-01-03']
     data = [[10], [20], [15]]  # Values associated with the timestamps
@@ -169,4 +170,41 @@ if __name__ == "__main__":
     print(f"Current Out-Degree: {current_out_degree}")
     ts_out_degree=hygraph.get_node_degree_over_time(node_id=1,degree_type='out',return_type='history')
 
-    
+    both_degree= ts_in_degree.aggregate_time_series_cumulative(ts_out_degree,'both_degree').display_time_series()
+
+    hygraph.add_pgedge(oid=60,source=2,target=1,label='Trip',start_time=datetime.now() + timedelta(hours=5))
+    ts_in_degree = node_degree_history = hygraph.get_node_degree_over_time(node_id=1, degree_type='in',
+                                                                           return_type='history')
+    ts_out_degree = hygraph.get_node_degree_over_time(node_id=1, degree_type='out', return_type='history')
+    ts_in_degree.aggregate_time_series_cumulative(ts_out_degree,'both_degree').display_time_series()
+
+    subgraph_original=hygraph.add_subgraph('manhattan', label='Manhattan Subgraph',start_time=datetime(2023, 1, 1))
+    subgraph_original['data'].add_static_property("text",230,hygraph)
+    t1 = datetime.now() - timedelta(hours=3)
+    manhattan_station_ids = [1,2,3]  # IDs of stations in Manhattan at time t1
+    manhattan_edge_ids = [4,5]  # IDs of edges (trips) in Manhattan at time t1
+    # Add memberships for nodes
+    for node_id in manhattan_station_ids:
+        hygraph.add_membership(node_id, t1, ['manhattan'], 'node')
+
+    # Add memberships for edges
+    for edge_id in manhattan_edge_ids:
+        hygraph.add_membership(edge_id, t1, ['manhattan'], 'edge')
+    t2 = datetime.now()
+    nodes_to_remove = [1]  # IDs of nodes to remove
+    edges_to_remove = [4]  # IDs of edges to remove
+    for node_id in nodes_to_remove:
+        hygraph.remove_membership(node_id, t2, ['manhattan'], 'node')
+
+    for edge_id in edges_to_remove:
+        hygraph.remove_membership(edge_id, t2, ['manhattan'], 'edge')
+    # At time t1
+    subgraph_t1 = hygraph.get_subgraph_at('manhattan', t1)
+    # Display subgraph_t1...
+
+    # At time t2
+    subgraph_t2 = hygraph.get_subgraph_at('manhattan', t2)
+
+    hygraph.display_subgraph('manhattan',t1)
+
+    # Display subgraph_t2...

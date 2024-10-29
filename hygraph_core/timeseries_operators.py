@@ -16,9 +16,10 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from datetime import datetime
 
 class TimeSeriesMetadata:
-    def __init__(self, owner_id, element_type=''):
+    def __init__(self, owner_id, element_type='',attribute=None):
         self.owner_id = owner_id
         self.element_type = element_type
+        self.attribute=attribute
 
     def update_metadata(self,owner_id,element_id=''):
         self.owner_id=owner_id
@@ -82,6 +83,44 @@ class TimeSeries:
             data=subset_data.values,
             metadata=self.metadata
         )
+
+    def aggregate_time_series_cumulative(self, ts2, result_variable_name):
+        """
+        Aggregate two time series to maintain a cumulative count across time, regardless of variable names.
+
+        :param ts2: Second time series (TimeSeries instance).
+        :param result_variable_name: Name for the resulting variable in the aggregated time series.
+        :return: Aggregated time series with cumulative values as a new TimeSeries instance.
+        """
+        # Collect all unique timestamps from both time series
+        timestamps = sorted(set(self.data.time.values).union(set(ts2.data.time.values)))
+
+        # Initialize cumulative values array
+        cumulative_values = np.zeros(len(timestamps),dtype=int)
+        cumulative_value = 0
+
+        # Calculate cumulative value at each timestamp
+        for i,timestamp in enumerate(timestamps):
+            # Fetch values from each series, defaulting to 0 if timestamp is missing
+            value1 = self.get_value_at_timestamp(timestamp) if self.has_timestamp(timestamp) else 0
+            value2 = ts2.get_value_at_timestamp(timestamp) if ts2.has_timestamp(timestamp) else 0
+
+            # Increment cumulative sum and store for current timestamp
+            cumulative_value += value1 + value2
+            cumulative_values[i]=cumulative_value
+
+        # Create a DataArray for cumulative results with aligned timestamps
+        data_array = xr.DataArray(
+            np.array(cumulative_values).reshape(-1, 1),
+            coords={'time': pd.to_datetime(timestamps), 'variable': [result_variable_name]},
+            dims=['time', 'variable']
+        )
+
+        # Return new TimeSeries with cumulative data
+        metadata = TimeSeriesMetadata(owner_id=None)
+        tsid = f"{self.tsid}_cumulative_{ts2.tsid}"
+        return TimeSeries(tsid, data_array.time, [result_variable_name], data_array.values, metadata)
+
     def apply_aggregation(self, aggregation_name, start_time=None, end_time=None, variable_name=None):
         """
         Apply an aggregation function (like 'sum', 'mean', etc.) to the time series data,
@@ -232,7 +271,7 @@ class TimeSeries:
 
         # --- Access Specific Values or Timestamps ---
 
-    def get_value_at_timestamp(self, timestamp, variable_name=None):
+    '''def get_value_at_timestamp(self, timestamp, variable_name=None):
         """
         Retrieve the value(s) at a specific timestamp for the given variable.
 
@@ -246,7 +285,35 @@ class TimeSeries:
                 return self.data.sel(time=timestamp)[variable_name].values
             return self.data.sel(time=timestamp).values
         except KeyError:
-            raise ValueError(f"Timestamp {timestamp} not found in time series.")
+            raise ValueError(f"Timestamp {timestamp} not found in time series.")'''
+
+    def get_value_at_timestamp(self, timestamp, variable_name=None):
+        """
+        Retrieve the value at a specific timestamp for the given variable.
+
+        :param timestamp: Timestamp for which the value is needed.
+        :param variable_name: The name of the variable to retrieve (optional).
+        :return: The value at the given timestamp.
+        """
+        # Ensure timestamp is a numpy datetime64 for compatibility with times array
+        timestamp = np.datetime64(pd.to_datetime(timestamp))
+        times = self.data.coords['time'].values
+
+        # Find the index of the timestamp or the most recent timestamp before it
+        if timestamp < times[0]:
+            # The timestamp is before the earliest timestamp in the data
+            return None
+        idx = np.searchsorted(times, timestamp, side='right') - 1
+
+        if variable_name:
+            # Retrieve the value for the specific variable
+            try:
+                return self.data.isel(time=idx).sel(variable=variable_name).values.item()
+            except KeyError:
+                raise ValueError(f"Variable '{variable_name}' not found in time series.")
+        else:
+            # Retrieve the value for the first variable if no variable_name is specified
+            return self.data.isel(time=idx, variable=0).values.item()
 
     def get_timestamp_at_value(self, value, variable_name=None):
         """
@@ -403,15 +470,23 @@ class TimeSeries:
         self_values = self.data.values
         other_values = other_timeseries.data.values
         if self_values.shape != other_values.shape:
-            raise ValueError("Both time series must have the same length for Euclidean distance.")
-        return np.linalg.norm(self_values - other_values)
+            # Handle different lengths or variables if needed
+            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
+            self_values = self_values[:min_length].data.values
+            other_values = other_values[:min_length].data.values
+            #raise ValueError("Both time series must have the same length for Euclidean distance.")
+        return np.linalg.norm(self_values.flatten() - other_values.flatten())
 
     def correlation_coefficient(self, other_timeseries):
         self_values = self.data.values
         other_values = other_timeseries.data.values
         if self_values.shape != other_values.shape:
-            raise ValueError("Both time series must have the same length for calculating correlation coefficient.")
-        correlation = np.corrcoef(self_values, other_values)[0, 1]
+            # Handle different lengths or variables if needed
+            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
+            self_values = self_values[:min_length].data.values
+            other_values = other_values[:min_length].data.values
+            #raise ValueError("Both time series must have the same length for calculating correlation coefficient.")
+        correlation = np.corrcoef(self_values.flatten(), other_values.flatten())[0, 1]
         return correlation
 
     def cosine_similarity(self, other_timeseries):
@@ -419,15 +494,19 @@ class TimeSeries:
         other_values = other_timeseries.data.values.flatten()
         if np.any(np.linalg.norm(self_values) == 0) or np.any(np.linalg.norm(other_values) == 0):
             raise ValueError("One of the time series is a zero vector which makes cosine similarity undefined.")
-        cosine_value = np.dot(self_values, other_values) / (np.linalg.norm(self_values) * np.linalg.norm(other_values))
+        cosine_value = np.dot(self_values.flatten(), other_values.flatten()) / (np.linalg.norm(self_values) * np.linalg.norm(other_values))
         return cosine_value
 
     def manhattan_distance(self, other_timeseries):
         self_values = self.data.values
         other_values = other_timeseries.data.values
         if self_values.shape != other_values.shape:
-            raise ValueError("Both time series must have the same length for Manhattan distance.")
-        return np.sum(np.abs(self_values - other_values))
+            # Handle different lengths or variables if needed
+            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
+            self_values = self_values[:min_length].data.values
+            other_values = other_values[:min_length].data.values
+            #raise ValueError("Both time series must have the same length for Manhattan distance.")
+        return np.sum(np.abs(self_values.flatten() - other_values.flatten()))
 
     def dynamic_time_warping(self, other_timeseries):
         """

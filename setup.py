@@ -11,10 +11,14 @@ setup(
     url='https://github.com/yourusername/my_hygraph_package',  # URL to the project repository
     packages=find_packages(),        # Automatically find packages in the directory
     install_requires=[
-        'pandas',
-        'networkx',
-        'numpy',
-        # Add other dependencies here
+        'numpy',  # For numerical operations
+        'pandas',  # For timestamp management and data manipulation
+        'xarray',  # For handling multidimensional time series
+        'scipy',  # For scientific computations, e.g., distance metrics
+        'fastdtw',  # For Dynamic Time Warping similarity computation
+        'networkx',  # For graph management and operations
+        'matplotlib',  # Optional, for visualization of time series or graphs
+        'scikit-learn',  # Optional, for advanced similarity metrics or clustering (cosine similarity, etc.)
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

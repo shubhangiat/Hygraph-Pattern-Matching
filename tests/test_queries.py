@@ -394,6 +394,30 @@ class TestHyGraphQuery(unittest.TestCase):
             print("Total distance:", result['distance'])
             print("avg_electric_bike_availability:", result['avg_electric_bike_availability'])
 
+
+    def test_all_edges_between_node(self):
+
+        # Define the IDs of the nodes you want to find edges between
+        source_node_id = 1
+        target_node_id = 2
+
+        # Define the time interval for the query
+
+        start_time = datetime(2023, 12, 31)
+
+        # Construct the query
+        query = HyGraphQuery(self.hygraph) \
+            .match_node(alias='source_node', node_id=source_node_id) \
+            .match_node(alias='target_node', node_id=target_node_id) \
+            .match_edge(alias='edge') \
+            .connect('source_node', 'edge', 'target_node') \
+            .where(lambda edge: pd.Timestamp(edge.start_time) >= pd.Timestamp(start_time))  \
+            .return_(edges=lambda result: result['edge']).execute()
+
+        # Print the matching edges
+        for edge in query:
+            print(edge)
+
 if __name__ == '__main__':
     unittest.main()
 
