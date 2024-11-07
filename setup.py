@@ -2,13 +2,13 @@ from setuptools import setup, find_packages
 
 setup(
     name='hygraph_core',       # Name of your package
-    version='0.1.0',                 # Version of your package
+    version='0.2.8',                 # Version of your package
     description='A package for managing and analyzing HyGraph data',
     long_description=open('README.md').read(),  # Read the content of README.md
     long_description_content_type='text/markdown',
     author='Mouna',
     author_email='',
-    url='https://github.com/yourusername/my_hygraph_package',  # URL to the project repository
+    url='https://github.com/',  # URL to the project repository
     packages=find_packages(),        # Automatically find packages in the directory
     install_requires=[
         'numpy',  # For numerical operations
@@ -19,6 +19,9 @@ setup(
         'networkx',  # For graph management and operations
         'matplotlib',  # Optional, for visualization of time series or graphs
         'scikit-learn',  # Optional, for advanced similarity metrics or clustering (cosine similarity, etc.)
+        'igraph',
+        'statsmodels'
+
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

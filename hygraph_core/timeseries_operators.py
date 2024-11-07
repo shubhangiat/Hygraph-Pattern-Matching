@@ -16,10 +16,10 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from datetime import datetime
 
 class TimeSeriesMetadata:
-    def __init__(self, owner_id, element_type='',attribute=None):
+    def __init__(self, owner_id, element_type='',attributes=None):
         self.owner_id = owner_id
         self.element_type = element_type
-        self.attribute=attribute
+        self.attributes = attributes or {}  # Initialize attributes as a dictionary
 
     def update_metadata(self,owner_id,element_id=''):
         self.owner_id=owner_id
@@ -106,8 +106,8 @@ class TimeSeries:
             value2 = ts2.get_value_at_timestamp(timestamp) if ts2.has_timestamp(timestamp) else 0
 
             # Increment cumulative sum and store for current timestamp
-            cumulative_value += value1 + value2
-            cumulative_values[i]=cumulative_value
+            #cumulative_value += value1 + value2
+            cumulative_values[i]=value1 + value2
 
         # Create a DataArray for cumulative results with aligned timestamps
         data_array = xr.DataArray(
@@ -462,61 +462,247 @@ class TimeSeries:
         return output
 
     # --- Time Series Similarity ---
+
     def euclidean_distance(self, other_timeseries):
         """
         Compute the Euclidean distance between this time series and another.
         Both time series must have the same length.
         """
-        self_values = self.data.values
-        other_values = other_timeseries.data.values
-        if self_values.shape != other_values.shape:
-            # Handle different lengths or variables if needed
-            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
-            self_values = self_values[:min_length].data.values
-            other_values = other_values[:min_length].data.values
-            #raise ValueError("Both time series must have the same length for Euclidean distance.")
-        return np.linalg.norm(self_values.flatten() - other_values.flatten())
+        # Ensure the variables and time indices match
+        if not np.array_equal(self.data.coords['variable'], other_timeseries.data.coords['variable']):
+            raise ValueError("TimeSeries objects have different variables.")
+        if not np.array_equal(self.data.coords['time'], other_timeseries.data.coords['time']):
+            raise ValueError("TimeSeries objects have different time indices.")
+
+        # Extract data as numpy arrays and flatten
+        data1 = self.data.values.flatten()
+        data2 = other_timeseries.data.values.flatten()
+
+        # Min-Max normalization across both datasets
+        total_min = min(data1.min(), data2.min())
+        total_max = max(data1.max(), data2.max())
+        range_total = total_max - total_min
+
+        if range_total == 0:
+            # Avoid division by zero if all values are the same
+            data1_norm = data1 * 0
+            data2_norm = data2 * 0
+        else:
+            data1_norm = (data1 - total_min) / range_total
+            data2_norm = (data2 - total_min) / range_total
+
+        # Compute Euclidean distance
+        distance = np.linalg.norm(data1_norm - data2_norm)
+
+        # Compute maximum possible distance for normalization
+        max_distance = np.sqrt(len(data1_norm))
+        if max_distance == 0:
+            # Handle the case where there are no elements
+            normalized_distance = 0.0
+        else:
+            normalized_distance = distance / max_distance
+
+        return normalized_distance
 
     def correlation_coefficient(self, other_timeseries):
         self_values = self.data.values
         other_values = other_timeseries.data.values
+
         if self_values.shape != other_values.shape:
-            # Handle different lengths or variables if needed
-            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
-            self_values = self_values[:min_length].data.values
-            other_values = other_values[:min_length].data.values
-            #raise ValueError("Both time series must have the same length for calculating correlation coefficient.")
-        correlation = np.corrcoef(self_values.flatten(), other_values.flatten())[0, 1]
+            # Truncate to the minimum length
+            min_length = min(self_values.shape[0], other_values.shape[0])
+            self_values = self_values[:min_length]
+            other_values = other_values[:min_length]
+
+        # Flatten the arrays
+        self_flat = self_values.flatten()
+        other_flat = other_values.flatten()
+
+        # Compute correlation coefficient
+        correlation_matrix = np.corrcoef(self_flat, other_flat)
+        correlation = correlation_matrix[0, 1]
         return correlation
 
     def cosine_similarity(self, other_timeseries):
         self_values = self.data.values.flatten()
         other_values = other_timeseries.data.values.flatten()
-        if np.any(np.linalg.norm(self_values) == 0) or np.any(np.linalg.norm(other_values) == 0):
-            raise ValueError("One of the time series is a zero vector which makes cosine similarity undefined.")
-        cosine_value = np.dot(self_values.flatten(), other_values.flatten()) / (np.linalg.norm(self_values) * np.linalg.norm(other_values))
+
+        norm_self = np.linalg.norm(self_values)
+        norm_other = np.linalg.norm(other_values)
+
+        if norm_self == 0 or norm_other == 0:
+            raise ValueError("One of the time series is a zero vector, which makes cosine similarity undefined.")
+
+        cosine_value = np.dot(self_values, other_values) / (norm_self * norm_other)
         return cosine_value
 
-    def manhattan_distance(self, other_timeseries):
-        self_values = self.data.values
-        other_values = other_timeseries.data.values
-        if self_values.shape != other_values.shape:
-            # Handle different lengths or variables if needed
-            min_length = min(self.data.shape[0], other_timeseries.data.shape[0])
-            self_values = self_values[:min_length].data.values
-            other_values = other_values[:min_length].data.values
-            #raise ValueError("Both time series must have the same length for Manhattan distance.")
-        return np.sum(np.abs(self_values.flatten() - other_values.flatten()))
-
-    def dynamic_time_warping(self, other_timeseries):
+    def dynamic_time_warping(ts1, ts2, variable_name):
         """
-        Compute the Dynamic Time Warping (DTW) distance between two time series.
+        Compute normalized DTW distance between two TimeSeries instances.
         """
-        self_df = self.to_dataframe()
-        other_df = other_timeseries.to_dataframe()
-        distance, _ = fastdtw(self_df['value'].values, other_df['value'].values, dist=euclidean)
-        return distance
+        # Align the data based on timestamps
+        df1 = ts1.data.sel(variable=variable_name).to_pandas()
+        df2 = ts2.data.sel(variable=variable_name).to_pandas()
 
+        # Since DTW does not require equal lengths, we can proceed directly
+        # However, we need the data as numpy arrays
+        x = df1.values
+        y = df2.values
+
+        # Compute raw DTW distance
+        distance, path = fastdtw(x, y, dist=lambda a, b: np.abs(a - b))
+
+        # Normalize the distance
+        # Maximum possible distance is the sum over the alignment path of the maximum possible difference
+        max_val = max(df1.max(), df2.max())
+        min_val = min(df1.min(), df2.min())
+        max_possible_distance = len(path) * (max_val - min_val)
+        if max_possible_distance == 0:
+            normalized_distance = 0.0
+        else:
+            normalized_distance = distance / max_possible_distance
+
+        return normalized_distance
+
+    def dtw_independent_multivariate(self, other_timeseries, window: int = None) -> float:
+        """
+        Compute the normalized DTW distance by summing DTW distances over each variable.
+
+        :param other_timeseries: Another TimeSeries instance
+        :param window: Maximum warping window size (int). If None, no constraint.
+        :return: Normalized total DTW distance across all variables (float)
+        """
+        variables = self.data.coords['variable'].values
+        total_distance = 0.0
+
+        for var in variables:
+            series1 = self.data.sel(variable=var).values.flatten()
+            series2 = other_timeseries.data.sel(variable=var).values.flatten()
+
+            # Handle different lengths by trimming or interpolation if needed
+            min_length = min(len(series1), len(series2))
+            series1 = series1[:min_length]
+            series2 = series2[:min_length]
+
+            # Normalize the series
+            min_val = min(series1.min(), series2.min())
+            max_val = max(series1.max(), series2.max())
+            series1_norm = (series1 - min_val) / (max_val - min_val)
+            series2_norm = (series2 - min_val) / (max_val - min_val)
+
+            # Compute DTW distance using absolute difference
+            distance, _ = fastdtw(series1_norm, series2_norm, dist=lambda x, y: abs(x - y))
+            total_distance += distance
+
+        # Normalize the total distance
+        normalized_distance = total_distance / (len(variables) * min_length)
+        return normalized_distance
+
+    def dtw_dependent_multivariate(self, other_timeseries, window: int = None) -> float:
+        """
+        Compute the normalized DTW distance by considering variables together at each time point.
+
+        :param other_timeseries: Another TimeSeries instance
+        :param window: Maximum warping window size (int). If None, no constraint.
+        :return: Normalized DTW distance (float)
+        """
+        # Extract data as sequences of vectors
+        series1 = self.data.values
+        series2 = other_timeseries.data.values
+
+        # Handle different lengths by trimming or interpolation if needed
+        min_length = min(series1.shape[0], series2.shape[0])
+        series1 = series1[:min_length]
+        series2 = series2[:min_length]
+
+        # Normalize the data
+        min_val = min(series1.min(), series2.min())
+        max_val = max(series1.max(), series2.max())
+        series1_norm = (series1 - min_val) / (max_val - min_val)
+        series2_norm = (series2 - min_val) / (max_val - min_val)
+
+        # Compute DTW distance using Euclidean distance between vectors
+        distance, _ = fastdtw(series1_norm, series2_norm, dist=euclidean)
+        # Normalize by the sequence length
+        normalized_distance = distance / min_length
+        return normalized_distance
+
+    def extract_features(self):
+        """
+        Extract statistical features from the time series data.
+        :return: Feature vector (numpy array)
+        """
+        data = self.data.values.flatten()
+        features = []
+
+        # Compute statistical features
+        features.append(np.mean(data))  # Mean
+        features.append(np.std(data))  # Standard deviation
+        features.append(np.min(data))  # Minimum value
+        features.append(np.max(data))  # Maximum value
+        features.append(np.median(data))  # Median
+        features.append(np.percentile(data, 25))  # 25th percentile
+        features.append(np.percentile(data, 75))  # 75th percentile
+        features.append(np.var(data))  # Variance
+        # Add more features as needed
+
+        # Convert features list to numpy array
+        features_vector = np.array(features)
+        return features_vector
+
+    def feature_similarity(self, other_timeseries, metric='cosine'):
+        """
+        Compute feature similarity between this time series and another.
+        :param other_timeseries: Another TimeSeries object
+        :param metric: Similarity metric ('cosine', 'euclidean', etc.)
+        :return: Similarity value
+        """
+        features1 = self.extract_features()
+        features2 = other_timeseries.extract_features()
+
+        if metric == 'cosine':
+            similarity = self.cosine_similarity_features(features1, features2)
+        elif metric == 'euclidean':
+            distance = np.linalg.norm(features1 - features2)
+            similarity = 1 / (1 + distance)  # Convert distance to similarity
+        else:
+            raise ValueError(f"Unsupported feature similarity metric: {metric}")
+        return similarity
+
+    def cosine_similarity_features(self, vec1, vec2):
+        """
+        Compute cosine similarity between two feature vectors.
+        :param vec1: Feature vector from this time series
+        :param vec2: Feature vector from another time series
+        :return: Cosine similarity value
+        """
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        similarity = np.dot(vec1, vec2) / (norm1 * norm2)
+        return similarity
+
+    def shape_similarity(self, other_timeseries, variable_name, metric='euclidean',):
+        """
+        Compute shape similarity using existing methods.
+        :param other_timeseries: Another TimeSeries object
+        :param metric: Similarity metric
+        :return: Similarity value
+        """
+        if metric == 'euclidean':
+            distance = self.euclidean_distance(other_timeseries)
+            similarity = 1 / (1 + distance)
+        elif metric == 'dtw':
+            distance = self.dynamic_time_warping(other_timeseries,variable_name)
+            similarity = 1 / (1 + distance)
+        elif metric == 'correlation':
+            similarity = self.correlation_coefficient(other_timeseries)
+        elif metric == 'cosine':
+            similarity = self.cosine_similarity(other_timeseries)
+        else:
+            raise ValueError(f"Unsupported shape similarity metric: {metric}")
+        return similarity
     # --- Time Series Classification ---
     def classify(self, train_data, train_labels, method='knn', **kwargs):
         """
@@ -578,7 +764,23 @@ class TimeSeries:
         model = ExponentialSmoothing(df['value'], trend=trend, seasonal=seasonal, seasonal_periods=seasonal_periods)
         fitted_model = model.fit()
         return fitted_model.fittedvalues
+    #Utility functions
+    def align_time_series(self, other):
+        """
+        Align two time series on their timestamps and variables.
 
+        :param other: Another TimeSeries object
+        :return: Tuple of aligned TimeSeries objects
+        """
+        # Find common timestamps
+        common_times = self.data.coords['time'].values
+        common_vars = self.data.coords['variable'].values
+
+        # Reindex both time series
+        ts1_aligned = self.data.sel(time=common_times, variable=common_vars)
+        ts2_aligned = other.data.sel(time=common_times, variable=common_vars)
+
+        return ts1_aligned, ts2_aligned
 
 def generate_time_series(length, noise_factor=0.1):
     """

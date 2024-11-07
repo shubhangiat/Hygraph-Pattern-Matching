@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta
 import time
+
+import numpy as np
+import pandas as pd
 from watchdog.observers import Observer
 
 from HyGraphFileLoaderBatch import HyGraphBatchProcessor
@@ -7,7 +10,7 @@ from hygraph import HyGraph, Edge, PGNode, HyGraphQuery
 from fileProcessing import NodeFileHandler, EdgeFileHandler, HyGraphFileLoader
 import os
 
-from hygraph_core.timeseries_operators import TimeSeries
+from hygraph_core.timeseries_operators import TimeSeries, TimeSeriesMetadata
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,8 +45,8 @@ if __name__ == "__main__":
     # Define a condition to filter edges
     def node_filter(node):
         node_obj = node['data']
-        print("node filter here ok : ", int(node_obj.properties.get('age', 0)) > 14)
-        return node_obj.label == 'Person' and int(node_obj.properties.get('age', 0)) > 14
+        print("node filter here ok : ", int(node_obj.get_static_property('age')) > 14)
+        return node_obj.label == 'Person' and int(node_obj.get_static_property('age'))  > 14
 
     def edge_filter(edge):
         edge_obj = edge['data']
@@ -78,21 +81,20 @@ if __name__ == "__main__":
                 print("Batch processing completed.")
         except KeyboardInterrupt:
             print("Batch processing terminated.")
-            break
+            break'''
 
 
 #out of files :
     # Sample data for time series
-    timestamps = ['2024-10-01', '2024-10-02', '2024-10-03']
+    '''timestamps = ['2024-10-01', '2024-10-02', '2024-10-03']
     variables = ['temperature']
     data = [[25], [27], [28]]
 
     # Add a time series in the hygraph
-    graph_element.add_temporal_property('temperature', timestamps, variables, data) '''
+    graph_element.add_temporal_property('temperature', timestamps, variables, data)'''
 
     hygraph = HyGraph()  # Initialize an empty HyGraph instance
-
-    # Add mock PGNode stations with static properties including 'capacity'
+    #Add mock PGNode stations with static properties including 'capacity'
     node1 = hygraph.add_pgnode(oid=1, label='Station', start_time=datetime.now()- timedelta(hours=7),
                                properties={'capacity': 100, 'name': 'Station A'})
     node2=hygraph.add_pgnode(oid=2, label='Station', start_time=datetime.now()- timedelta(hours=8),
@@ -110,7 +112,7 @@ if __name__ == "__main__":
 
 
     edge1=hygraph.add_pgedge(oid=4,source=1,target=2,label='Trip', start_time=datetime.now() - timedelta(hours=4))
-    edge2 = hygraph.add_pgedge(oid=5, source=2, target=3, label='Trip', start_time=datetime.now() - timedelta(hours=3))
+    edge2 = hygraph.add_pgedge(oid=5, source=1, target=3, label='Trip', start_time=datetime.now() - timedelta(hours=3))
     # Create a TimeSeries object
     timestamps = ['2023-01-01', '2023-01-02', '2023-01-03']
     data = [[10], [20], [15]]  # Values associated with the timestamps
@@ -178,7 +180,7 @@ if __name__ == "__main__":
     ts_out_degree = hygraph.get_node_degree_over_time(node_id=1, degree_type='out', return_type='history')
     ts_in_degree.aggregate_time_series_cumulative(ts_out_degree,'both_degree').display_time_series()
 
-    subgraph_original=hygraph.add_subgraph('manhattan', label='Manhattan Subgraph',start_time=datetime(2023, 1, 1))
+    '''subgraph_original=hygraph.add_subgraph('manhattan', label='Manhattan Subgraph',start_time=datetime(2023, 1, 1))
     subgraph_original['data'].add_static_property("text",230,hygraph)
     t1 = datetime.now() - timedelta(hours=3)
     manhattan_station_ids = [1,2,3]  # IDs of stations in Manhattan at time t1
@@ -205,6 +207,169 @@ if __name__ == "__main__":
     # At time t2
     subgraph_t2 = hygraph.get_subgraph_at('manhattan', t2)
 
-    hygraph.display_subgraph('manhattan',t1)
+    station_nodes = hygraph.get_nodes_by_label('Station')
+    print("\nNodes with label 'Station':", station_nodes)'''
+
+
 
     # Display subgraph_t2...
+    '''nodes_data = [
+        {
+            'id': 'station_1',
+            'label': 'Station',
+            'start_time': datetime(2023, 1, 1),
+            'end_time': None,
+            'properties': {
+                'name': 'Station 1',
+                'capacity': 25,
+                'lat': 40.7128,
+                'lon': -74.0060
+            }
+        },
+        {
+            'id': 'station_2',
+            'label': 'Station',
+            'start_time': datetime(2023, 1, 1),
+            'end_time': None,
+            'properties': {
+                'name': 'Station 2',
+                'capacity': 30,
+                'lat': 40.7138,
+                'lon': -74.0070
+            }},
+            {
+            'id': 'station_3',
+            'label': 'Station',
+            'start_time': datetime(2023, 1, 1),
+            'end_time': None,
+            'properties': {
+                'name': 'User 1',
+                'age': 30
+            }
+        }
+    ]
+
+    # Add nodes to HyGraph
+    for node_data in nodes_data:
+        hygraph.add_pgnode(
+            oid=node_data['id'],
+            label=node_data['label'],
+            start_time=node_data['start_time'],
+            end_time=node_data['end_time'],
+            properties=node_data['properties'])
+
+    # Sample edge data
+    edges_data = [
+        {
+            'id': 'edge_1',
+            'source_id': 'station_1',
+            'target_id': 'station_2',
+            'label': 'Trip',
+            'start_time': datetime(2023, 1, 1),
+            'end_time': None,
+            'properties': {
+                'distance': 1.2  # in kilometers
+            }
+        }
+    ]
+
+    # Add edges to HyGraph
+    for edge_data in edges_data:
+        hygraph.add_pgedge(
+            oid=edge_data['id'],
+            source=edge_data['source_id'],
+            target=edge_data['target_id'],
+            label=edge_data['label'],
+            start_time=edge_data['start_time'],
+            end_time=edge_data['end_time'],
+            properties=edge_data['properties']
+        )
+    # Sample subgraph data
+    subgraph_properties = {
+        'description': ('Stations in Manhattan', 'static'),
+        'creation_date': (datetime.now(), 'static')
+    }
+
+    # Add a subgraph to HyGraph
+    hygraph.add_subgraph(
+        subgraph_id='manhattan',
+        label='Manhattan Subgraph',
+        properties=subgraph_properties,
+        start_time=datetime(2023, 1, 1)
+    )
+    # Add node memberships to subgraphs
+    hygraph.add_membership(
+        element_id='station_1',
+        timestamp=datetime(2023, 1, 1),
+        subgraph_ids=['manhattan'],
+        element_type='node'
+    )
+
+    hygraph.add_membership(
+        element_id='station_2',
+        timestamp=datetime(2023, 1, 1),
+        subgraph_ids=['manhattan'],
+        element_type='node'
+    )
+    hygraph.add_membership(element_id='station_3', timestamp=datetime(2023, 3, 1),subgraph_ids=['manhattan'],element_type='node')
+
+    timestamp = datetime(2023, 1, 1)  # Example timestamp
+
+    # Get the subgraph at the given timestamp
+    subgraph_at_time = hygraph.get_subgraph_at('manhattan', timestamp)
+
+    # Display the subgraph
+    import matplotlib.pyplot as plt
+    import networkx as nx
+    # Check nodes and edges in the subgraph
+    print(f"Nodes in subgraph at {timestamp}: {list(subgraph_at_time.nodes())}")
+    print(f"Edges in subgraph at {timestamp}: {list(subgraph_at_time.edges())}")
+
+    plt.figure(figsize=(12, 12))
+    pos = nx.spring_layout(subgraph_at_time, k=0.15, iterations=20)
+    nx.draw_networkx_nodes(subgraph_at_time, pos, node_size=50, node_color='blue')
+    nx.draw_networkx_edges(subgraph_at_time, pos, alpha=0.3)
+    nx.draw_networkx_labels(subgraph_at_time, pos, font_size=8)
+    plt.title(f"Subgraph 'manhattan' at {timestamp}")
+    plt.axis('off')
+    plt.show()'''
+
+
+    def create_trip_series(start_time, length=10):
+        timestamps = [start_time + timedelta(minutes=5 * i) for i in range(length)]
+        trip_counts = np.random.randint(5, 20, size=length)
+        data = trip_counts.reshape((length, 1))  # Reshape to (length, 1)
+        metadata = TimeSeriesMetadata(owner_id=None)
+
+        return hygraph.add_time_series(
+            timestamps=timestamps,
+            variables=['trip_count'],
+            data=data,
+            metadata=metadata
+        )
+
+
+    fixed_date = datetime(2023, 1, 1, 0, 0, 0)
+    ts3= create_trip_series(start_time=fixed_date)
+    ts4 = create_trip_series(start_time=fixed_date)
+
+    # Create sample time series data
+    timestamps1 = pd.date_range(start='2023-01-01', periods=5, freq='D')
+    timestamps2 = pd.date_range(start='2023-01-01', periods=5, freq='D')
+    variables = ['var1', 'var2']
+    data1 = np.random.rand(5, 2)
+    data2 = np.random.rand(5, 2)
+
+    metadata= TimeSeriesMetadata(1)
+    # Create TimeSeries instances
+    ts1 = TimeSeries(tsid='ts1', timestamps=timestamps1, variables=variables, data=data1,metadata=metadata)
+    ts2 = TimeSeries(tsid='ts2', timestamps=timestamps2, variables=variables, data=data2,metadata=metadata)
+    ts3.display_time_series()
+    ts4.display_time_series()
+    # Compute similarity measures
+    print("Euclidean Distance:", ts3.euclidean_distance(ts4))
+    print("Correlation Coefficient:", ts4.correlation_coefficient(ts3))
+    print("Cosine Similarity:", ts3.cosine_similarity(ts4))
+    print("DTW Distance:", ts4.dynamic_time_warping(ts3,'trip_count'))
+    print('DTW MUltivariate', ts1.dtw_independent_multivariate(ts1))
+

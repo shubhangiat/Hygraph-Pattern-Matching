@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from fastdtw import fastdtw
-from numpy.lib.utils import source
+
 from scipy.spatial.distance import euclidean
 from datetime import datetime, timedelta
 from igraph import Graph as IGraph
@@ -22,7 +22,7 @@ from hygraph_core.constraints import parse_datetime
 
 class HyGraph:
     def __init__(self):
-        self.graph = nx.MultiGraph()
+        self.graph = nx.MultiDiGraph()
         self.time_series = {}
         self.subgraphs = {}
         self.id_generator = IDGenerator()
@@ -164,12 +164,15 @@ class HyGraph:
         # Step 2: Add the timeseries to Hygraph storage
         self.time_series[time_series.tsid] = time_series
         start_time = time_series.first_timestamp()
+        end_time=time_series.last_timestamp()
         # Step 3: Add the node to the networkx graph
         self.graph.add_node(oid,
                             label=label,
                             series=time_series.tsid,  # Store only the timeseries ID in the node
                             metadata=metadata,
                             data=tsnode,
+                            start_time =start_time,
+                            end_time=end_time,
                             type="TSNode")
         # Call function to initialize in_degree and out_degree as TimeSeries within metadata
         self.initialize_degree_timeseries(oid, start_time)
@@ -197,7 +200,7 @@ class HyGraph:
             raise ValueError(f"Target node {target} does not exist.")
 
         # Step 2: Create the TSEdge instance
-        tsedge = TSEdge (oid, label, time_series)
+        tsedge = TSEdge (oid,source,target, label, time_series)
 
         # Step 3: Add the timeseries to Hygraph storage
         self.time_series[time_series.tsid] = time_series
@@ -222,22 +225,29 @@ class HyGraph:
 
         return tsedge
 
-    def add_subgraph(self, subgraph_id, label=None, static_properties=None, start_time=None, end_time=None,temporal_properties=None,
-                        node_filter=None, edge_filter=None):
+    def add_subgraph(self, subgraph_id, label=None, properties=None, start_time=None, end_time=None,
+                     node_filter=None, edge_filter=None):
         """
         Create a subgraph based on node and edge filters, and store it in the subgraphs dictionary.
 
         :param subgraph_id: Identifier for the subgraph.
         :param label: Label for the subgraph.
-        :param static_properties: Dictionary of static properties for the subgraph.
-        :param temporal_properties: Dictionary of temporal properties for the subgraph.
+        :param properties: Dictionary of properties for the subgraph.
+                           Each key is a property name, and each value is a tuple (value, property_type),
+                           where property_type is 'static' or 'temporal'.
+        :param start_time: Start time of the subgraph's validity.
+        :param end_time: End time of the subgraph's validity.
         :param node_filter: Function that takes (node_id, data) and returns True if the node should be included.
         :param edge_filter: Function that takes (u, v, key, data) and returns True if the edge should be included.
         """
         # Check if subgraph_id already exists
         if subgraph_id in self.subgraphs:
             raise ValueError(f"Subgraph with ID '{subgraph_id}' already exists.")
-        if end_time is None: end_time = FAR_FUTURE_DATE
+        if end_time is None:
+            end_time = FAR_FUTURE_DATE
+        if start_time is None:
+            start_time = datetime.now()
+
         # Create a subgraph view using NetworkX's subgraph_view
         subgraph_view = nx.subgraph_view(
             self.graph,
@@ -247,25 +257,57 @@ class HyGraph:
 
         # Create a Subgraph object with label and properties
         subgraph_obj = Subgraph(
-            subgraph_id,
-            label or f"Subgraph {subgraph_id}",
-            start_time or datetime.now(),
-            end_time or FAR_FUTURE_DATE,
-            static_properties or {},
-            temporal_properties or {},
-
-
+            subgraph_id=subgraph_id,
+            label=label or f"Subgraph {subgraph_id}",
+            start_time=start_time,
+            end_time=end_time
         )
 
+        # Process properties
+        if properties:
+            for prop_name, prop_value in properties.items():
+                if isinstance(prop_value, tuple) and len(prop_value) == 2:
+                    value, prop_type = prop_value
+                    if prop_type == 'static':
+                        subgraph_obj.add_static_property(prop_name, value, self)
+                    elif prop_type == 'temporal':
+                        subgraph_obj.add_temporal_property(prop_name, value, self)
+                    else:
+                        raise ValueError(f"Invalid property type '{prop_type}' for property '{prop_name}'.")
+                else:
+                    # Default to static property if type is not specified
+                    subgraph_obj.add_static_property(prop_name, prop_value, self)
+        # **Update node memberships using add_membership**
+        for node_id in subgraph_view.nodes():
+            # Assuming 'TSNode' or 'PGNode' depending on your node type
+            element_type = 'node' # You may need to adjust this line
+            self.add_membership(
+                element_id=node_id,
+                timestamp=start_time,
+                subgraph_ids=[subgraph_id],
+                element_type=element_type
+            )
+
+        # **Update edge memberships using add_membership**
+        for u, v, k in subgraph_view.edges(keys=True):
+            edge = self.get_edge_by_id(k)
+            element_type = 'edge'  # You may need to adjust this line
+            self.add_membership(
+                element_id=k,
+                timestamp=start_time,
+                subgraph_ids=[subgraph_id],
+                element_type=element_type
+            )
         # Store the subgraph view and Subgraph object in the subgraphs dictionary
         self.subgraphs[subgraph_id] = {
             'view': subgraph_view,  # The NetworkX subgraph view
             'data': subgraph_obj,  # The Subgraph object with label and properties
             'created_at': datetime.now()  # Timestamp of creation
         }
-
-        print(f"Subgraph '{subgraph_id}' created and stored.")
+        print(f"Subgraph '{subgraph_id}' created and stored at {start_time}.")
         return self.subgraphs[subgraph_id]
+
+
 
     def set_updated(self, value=True):
         self.updated = value
@@ -333,30 +375,47 @@ class HyGraph:
             print(f"No element found with ID {element_id}")
             return
 
+        timestamp = pd.Timestamp(timestamp).to_datetime64()  # Ensure consistent timestamp format
+
         if element.membership is None:
+            # TimeSeries does not exist, create it
             tsid = self.id_generator.generate_timeseries_id()
-            membership_string = ' '.join(subgraph_ids)
-            metadata=TimeSeriesMetadata(element_id,element_type,'membership')
-            time_series = TimeSeries(tsid, [timestamp], ['membership'], membership_string,metadata)
+            metadata = TimeSeriesMetadata(element_id, element_type, 'membership')
+            # Initial memberships are the provided subgraph_ids
+            updated_memberships = sorted(set(subgraph_ids))
+            membership_string = ' '.join(updated_memberships)
+            time_series = TimeSeries(tsid, [timestamp], ['membership'], [[membership_string]], metadata)
             self.time_series[tsid] = time_series
             element.membership = tsid
-            print(f"Timeseries created for: {element_type} {element_id}: {time_series}")
+            print(f"TimeSeries created for: {element_type} {element_id}: {time_series}")
         else:
             tsid = element.membership
             time_series = self.time_series[tsid]
-            # Initialize the membership string for each update
-            # Ensure there is at least one entry to extract the last state
-            # Get the last known membership state
-            if time_series.data.shape[0] > 0:
-                last_entry = time_series.data.isel(time=-1).item().split()
-            else:
-                last_entry = []
-            # Combine, deduplicate, and sort memberships
-            updated_membership = sorted(set(last_entry + subgraph_ids))
-            membership_string = ' '.join(updated_membership)
-            time_series.append_data(timestamp, membership_string)
-            print(f"Updated membership for {element_type} {element_id} at {timestamp}: add {subgraph_ids}")
 
+            # Check if the timestamp already exists in the TimeSeries
+            if timestamp in time_series.data.coords['time'].values:
+                # Timestamp exists, get existing memberships at this timestamp
+                existing_value = time_series.get_value_at_timestamp(timestamp)
+            elif time_series.data.shape[0] > 0:
+                # Get last known membership state
+                existing_value = time_series.data.isel(time=-1).item()
+            else:
+                existing_value = ''
+
+            existing_memberships = existing_value.split() if existing_value else []
+
+            # Combine, deduplicate, and sort memberships
+            updated_memberships = sorted(set(existing_memberships + subgraph_ids))
+            membership_string = ' '.join(updated_memberships)
+
+            if timestamp in time_series.data.coords['time'].values:
+                # Update the value at the timestamp
+                time_series.update_value_at_timestamp(timestamp, membership_string)
+                print(f"Updated membership for {element_type} {element_id} at {timestamp}: add {subgraph_ids}")
+            else:
+                # Append new data point
+                time_series.append_data(timestamp, membership_string)
+                print(f"Appended new membership for {element_type} {element_id} at {timestamp}: add {subgraph_ids}")
     def remove_membership(self, element_id, timestamp, subgraph_ids,element_type):
         """
         Removes subgraph memberships from the element's TimeSeries at the given timestamp.
@@ -466,7 +525,7 @@ class HyGraph:
         """
         for u, v, key, data in self.graph.edges(keys=True, data=True):
             if key == oid:
-                return (u, v, key, data)
+                return self.graph.edges(key)
         raise ValueError(f"Edge with ID {oid} does not exist.")
 
     def get_timeseries(self, tsid, display=False, limit=None, order='first'):
@@ -522,8 +581,8 @@ class HyGraph:
                     edges_in_subgraph.append((u, v, key))
 
         # Create the subgraph
-        subgraph = self.graph.edge_subgraph(edges_in_subgraph).copy()
-        subgraph = subgraph.subgraph(nodes_in_subgraph).copy()
+        #subgraph = self.graph.edge_subgraph(edges_in_subgraph).copy()
+        subgraph = self.graph.subgraph(nodes_in_subgraph).copy()
 
         return subgraph
 
@@ -733,6 +792,36 @@ class HyGraph:
             if data.get('label') == label:
                 edges.append((u, v, key, data))
         return edges
+
+    def get_subgraphs_by_label(self, label):
+        """
+        Retrieve all subgraphs with the specified label.
+
+        :param label: The label to match.
+        :return: List of subgraphs matching the label.
+        """
+        subgraphs = []
+        for subgraph_id, subgraph_data in self.subgraphs.items():
+            subgraph = subgraph_data['data']
+            if subgraph.label == label:
+                subgraphs.append(subgraph)
+        return subgraphs
+
+    def get_subgraphs_by_static_property(self, property_name, condition):
+        """
+        Retrieve all subgraphs where the static property satisfies the given condition.
+
+        :param property_name: The name of the static property.
+        :param condition: A function that takes a property value and returns True if the condition is met.
+        :return: List of subgraphs matching the static property condition.
+        """
+        subgraphs = []
+        for subgraph_id, subgraph_data in self.subgraphs.items():
+            subgraph = subgraph_data['data']
+            static_prop = subgraph.static_properties.get(property_name)
+            if static_prop and condition(static_prop.value):
+                subgraphs.append(subgraph)
+        return subgraphs
 
     #deletion
 
@@ -1311,8 +1400,21 @@ class HyGraphQuery:
         })
         return self
 
-    def group_by(self, *aliases):
-        self.groupings.extend(aliases)
+    def group_by(self, *groupings):
+        """
+        Groups results based on provided aliases or functions that extract grouping keys from the result.
+
+        :param groupings: Aliases (strings) or functions that take a result dictionary and return a grouping key.
+        """
+        for grouping in groupings:
+            if callable(grouping):
+                # If grouping is a function, add it directly
+                self.groupings.append(grouping)
+            elif isinstance(grouping, str):
+                # If grouping is an alias, add the alias directly to self.groupings
+                self.groupings.append(grouping)
+            else:
+                raise ValueError("group_by accepts either alias strings or functions.")
         return self
 
     def aggregate(self, alias, property_name, method='sum', direction='both', fill_value=0):
@@ -1566,10 +1668,13 @@ class HyGraphQuery:
         if not self.aggregations and not self.groupings:
             return results
 
-        # Group results based on groupings (e.g., 'station' nodes)
+        # Group results based on groupings
         grouped_results = defaultdict(list)
         for result in results:
-            group_key = tuple(result[alias].getId() for alias in self.groupings)
+            group_key = tuple(
+                grouping(result) if callable(grouping) else result[grouping].getId()
+                for grouping in self.groupings
+            )
             grouped_results[group_key].append(result)
 
         # Define aggregation methods for both static values and time series
@@ -1577,15 +1682,25 @@ class HyGraphQuery:
             'sum': np.sum,
             'mean': np.mean,
             'min': np.min,
-            'max': np.max
+            'max': np.max,
+            'count': len  # Include 'count' if needed
         }
 
         # Process each group
         aggregated_results = []
         for group_key, group_items in grouped_results.items():
             agg_result = {}
-            for alias in self.groupings:
-                agg_result[alias] = group_items[0][alias]
+
+            # Include grouping keys in agg_result
+            for idx, grouping in enumerate(self.groupings):
+                key = group_key[idx]
+                if callable(grouping):
+                    # Grouping by function (e.g., node property)
+                    agg_result['group_key'] = key
+                else:
+                    # Grouping by alias
+                    alias = grouping
+                    agg_result[alias] = group_items[0][alias]
 
             # Apply aggregations for each specified property
             for aggregation in self.aggregations:
@@ -1595,35 +1710,60 @@ class HyGraphQuery:
                 direction = aggregation.get('direction', 'both')
                 fill_value = aggregation.get('fill_value', 0)
 
-                # Collect edges based on direction
-                central_node = group_items[0][self.groupings[0]]
-                connected_edges = [
-                    item[agg_alias]
-                    for item in group_items
-                    if self._edge_direction_matches(item[agg_alias], central_node, direction)
-                ]
+                # Determine elements to aggregate over
+                elements = []
+                if agg_alias in self.node_matches:
+                    # Aggregating over nodes
+                    elements = [item[agg_alias] for item in group_items if agg_alias in item]
+                elif agg_alias in self.edge_matches:
+                    # Aggregating over edges, consider direction
+                    if self.groupings:
+                        # Assume the central node is the first grouping alias (if it's an alias)
+                        grouping = self.groupings[0]
+                        if not callable(grouping):
+                            central_node_alias = grouping
+                            central_node = group_items[0][central_node_alias]
+                            elements = [
+                                item[agg_alias]
+                                for item in group_items
+                                if self._edge_direction_matches(item[agg_alias], central_node, direction)
+                            ]
+                        else:
+                            # Cannot determine central node when grouping by function
+                            elements = [item[agg_alias] for item in group_items if agg_alias in item]
+                    else:
+                        elements = [item[agg_alias] for item in group_items if agg_alias in item]
+                else:
+                    # Alias not found, skip
+                    continue
+                    # Handle 'count' method separately
+                if method == 'count':
+                    agg_result[agg_alias] = len(elements)
+                else:
 
                 # Separate handling for time series and static properties
-                if connected_edges :
-                    try :
-                        if isinstance(connected_edges[0].get_temporal_property(property_name), TimeSeries) :
-                            # Time series aggregation
-                            time_series_list = [
-                                edge.get_temporal_property(property_name)
-                                for edge in connected_edges if edge.get_temporal_property(property_name)
-                            ]
-                            if time_series_list:
-                                agg_result[property_name] = TimeSeries.aggregate_multiple(
-                                    time_series_list, method
-                                )
-                    except ValueError:
+                    if  elements:
+                        try:
+                            temporal_property = elements[0].get_temporal_property(property_name,0)
+                            if temporal_property and isinstance(temporal_property, TimeSeries):
+                                # Time series aggregation
+                                time_series_list = [
+                                    element.get_temporal_property(property_name,0)
+                                    for element in elements if element.get_temporal_property(property_name,0)
+                                ]
+                                if time_series_list:
+                                    agg_result[property_name] = TimeSeries.aggregate_multiple(
+                                        time_series_list, method
+                                    )
 
-                        # Static properties aggregation
-                        values = [
-                            edge.get_static_property(property_name)
-                            for edge in connected_edges if edge.get_static_property(property_name) is not None
-                        ]
-                        agg_result[property_name] = agg_funcs[method](values)
+                        except (ValueError):
+                            # Static properties aggregation
+                            values = [
+                                element.get_static_property(property_name)
+                                for element in elements if element.get_static_property(property_name) is not None
+                            ]
+                            if values:
+                                agg_result[property_name] = agg_funcs[method](values)
 
             aggregated_results.append(agg_result)
 

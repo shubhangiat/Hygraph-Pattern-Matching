@@ -1,11 +1,8 @@
 import os
 import pandas as pd
 from datetime import datetime
-from hygraph import HyGraph, Edge, PGNode, Subgraph, TimeSeries
-from fileProcessing import NodeFileHandler, EdgeFileHandler
-from collections import defaultdict
-import time
-from constraints import is_valid_membership, parse_datetime
+from hygraph_core.hygraph import HyGraph
+
 
 # Placeholder for a date far in the future
 FAR_FUTURE_DATE = datetime(2100, 12, 31, 23, 59, 59)
@@ -80,9 +77,7 @@ class HyGraphBatchProcessor:
                 external_id, start_time, end_time = str(row['id']), row['start_time'], row.get('end_time',FAR_FUTURE_DATE)
                 end_time = self.end_time_config(end_time)
                 if external_id not in existing_nodes:
-                    new_node = PGNode(oid=self.hygraph.id_generator.generate_node_id(), label=row['label'], start_time=start_time, end_time=end_time, node_id=external_id)
-                    new_node.properties.update(row.drop(['id', 'start_time', 'end_time']).to_dict())
-                    self.hygraph.add_node(new_node)
+                    self.hygraph.add_pgnode(oid=external_id, label=row['label'], start_time=pd.to_datetime(start_time), end_time=pd.to_datetime(end_time),properties=row.drop(['id', 'start_time', 'end_time']).to_dict())
                 else:
                     node = existing_nodes[external_id]
                     updated_properties = row.drop(['id', 'start_time', 'end_time']).to_dict()
@@ -110,17 +105,8 @@ class HyGraphBatchProcessor:
                             break
 
                     if not edge_exists:
-                        edge = Edge(oid=self.hygraph.id_generator.generate_edge_id(),
-                                    source=source_node.oid,
-                                    target=target_node.oid,
-                                    label=row['label'],
-                                    start_time=start_time,
-                                    end_time=end_time,
-                                    edge_id=external_edge_id)
 
-                        edge.properties.update(row.drop(['source_id', 'target_id', 'start_time', 'end_time']).to_dict())
-                        self.hygraph.add_edge(edge)
-
+                        self.hygraph.add_pgedge(oid=external_edge_id, source=source_node.oid, target=target_node.oid, label=row['label'], start_time=pd.to_datetime(start_time), end_time=pd.to_datetime(end_time),properties=row.drop(['source_id', 'target_id', 'start_time', 'end_time']).to_dict())
     def finalize_processing(self):
         print("Finalizing batch processing...")
         #self.hygraph.display()
@@ -134,12 +120,8 @@ class HyGraphBatchProcessor:
                 end_time = pd.to_datetime(row['end_time'])
                 properties = row.drop(['id', 'label', 'start_time', 'end_time']).to_dict()
 
-                # Create a new Subgraph object (assumes you have a Subgraph class)
-                subgraph = Subgraph(subgraph_id=subgraph_id, label=label, start_time=start_time, end_time=end_time)
-                subgraph.properties.update(properties)
-
                 # Add the subgraph to the HyGraph
-                self.hygraph.add_subgraph(subgraph)
+                self.hygraph.add_subgraph(subgraph_id=subgraph_id, label=label, start_time=pd.to_datetime(start_time), end_time=pd.to_datetime(end_time),properties=properties)
     """def process_subgraph_batches(self):
         # Create a dictionary to store subgraph start times
         subgraph_start_times = {}
@@ -199,7 +181,7 @@ class HyGraphBatchProcessor:
 
                     self.hygraph.update_membership(edge, timestamps, subgraph_ids)"""
 
-    def process_membership_data(self,file_path, element_type):
+    '''def process_membership_data(self,file_path, element_type):
         df = pd.read_csv(file_path, parse_dates=['timestamp'])
         df.sort_values(by='timestamp', inplace=True)  # Ensure entries are sorted by timestamp
 
@@ -224,7 +206,48 @@ class HyGraphBatchProcessor:
                     if action == 'add':
                         self.hygraph.add_membership(internal_id, timestamp, subgraph_ids,element_type)
                     elif action == 'remove':
-                        self.hygraph.remove_membership(internal_id, timestamp, subgraph_ids, element_type)
+                        self.hygraph.remove_membership(internal_id, timestamp, subgraph_ids, element_type)'''
+
+    def process_membership_data(self, file_path, element_type):
+        df = pd.read_csv(file_path, parse_dates=['timestamp'])
+        df.sort_values(by='timestamp', inplace=True)  # Ensure entries are sorted by timestamp
+
+        print("Processing membership data from:", file_path)
+        for _, row in df.iterrows():
+            external_ids = row['id'].split(' ')
+            subgraph_ids = row['subgraph_id'].split(' ')
+            timestamp = row['timestamp']
+            action = row['action']
+            print("External IDs:", external_ids)
+            for external_id in external_ids:
+                external_id = external_id.strip()  # Clean up any extra whitespace
+                # Since we're using external IDs directly, ensure the element exists
+                if element_type == 'node':
+                    if external_id not in self.hygraph.graph.nodes:
+                        print(f"Node with ID '{external_id}' does not exist. Skipping.")
+                        continue
+                elif element_type == 'edge':
+                    # For edges, we need to find the edge based on the external ID
+                    edge_found = False
+                    for u, v, k, data in self.hygraph.graph.edges(keys=True, data=True):
+                        edge_data = data.get('data')
+                        if edge_data and edge_data.oid == external_id:
+                            edge_found = True
+                            break
+                    if not edge_found:
+                        print(f"Edge with ID '{external_id}' does not exist. Skipping.")
+                        continue
+                else:
+                    print(f"Invalid element type '{element_type}'. Skipping.")
+                    continue
+
+                # Update the membership based on action
+                if action == 'add':
+                    self.hygraph.add_membership(external_id, timestamp, subgraph_ids, element_type)
+                elif action == 'remove':
+                    self.hygraph.remove_membership(external_id, timestamp, subgraph_ids, element_type)
+                else:
+                    print(f"Unknown action '{action}' in row. Skipping.")
 
     # Utility Functions
     def end_time_config(self,end_time):
