@@ -1,4 +1,4 @@
-# My HyGraph Package
+# HyGraph
 
 ## Description
 This package provides tools for managing and analyzing HyGraph data.
