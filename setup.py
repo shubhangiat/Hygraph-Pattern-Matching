@@ -20,8 +20,8 @@ setup(
         'matplotlib',  # Optional, for visualization of time series or graphs
         'scikit-learn',  # Optional, for advanced similarity metrics or clustering (cosine similarity, etc.)
         'igraph',
-        'statsmodels'
-
+        'statsmodels',
+        'watchdog'
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

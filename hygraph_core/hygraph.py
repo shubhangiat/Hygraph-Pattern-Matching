@@ -27,7 +27,7 @@ class HyGraph:
         self.subgraphs = {}
         self.id_generator = IDGenerator()
         self.updated = False  # Flag to track updates
-        self.query =None
+        self.query = None
 
     #create
 
